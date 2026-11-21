@@ -11,10 +11,11 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager};
 
 use crate::live_client::{find_killer, is_dead, my_names, LiveClient};
-use crate::recorder::{ffmpeg_path, pick_encoder, Recorder};
+use crate::recorder::{ffmpeg_path, pick_encoder, remove_stale_segments, Recorder};
 use crate::{player, set_status, settings, AppState};
 
 pub fn run(app: AppHandle) {
+    remove_stale_segments(); // safe here: single-instance means no other copy is recording
     let client = LiveClient::new();
     let ffmpeg = ffmpeg_path();
     let mut auto_encoder: Option<String> = None;

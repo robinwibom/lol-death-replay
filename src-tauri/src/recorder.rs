@@ -2,11 +2,17 @@
 //! so the last ~20 seconds are always on disk.
 
 use std::io::Write;
+use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
 
 use crate::settings::Settings;
 
@@ -32,6 +38,48 @@ pub fn ffmpeg_path() -> PathBuf {
     match bundled {
         Some(path) if path.exists() => path,
         _ => PathBuf::from("ffmpeg"),
+    }
+}
+
+/// A Windows job that kills every process in it when this app's process ends, however it ends:
+/// Quit, a crash, or Ctrl+C on `cargo tauri dev`. `Drop` doesn't run in any of those, and without
+/// this the recording ffmpeg would keep running on its own. The handle is never closed on purpose:
+/// Windows closes it when the process exits, and that's what triggers the kill.
+fn kill_on_exit_job() -> Option<usize> {
+    static JOB: OnceLock<Option<usize>> = OnceLock::new();
+    *JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return None;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let ok = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const _,
+            std::mem::size_of_val(&info) as u32,
+        );
+        (ok != 0).then_some(job as usize) // as usize: raw handles aren't Send, so they can't sit in a static
+    })
+}
+
+fn tie_to_app(child: &Child) {
+    let assigned = kill_on_exit_job()
+        .is_some_and(|job| unsafe { AssignProcessToJobObject(job as _, child.as_raw_handle() as _) != 0 });
+    if !assigned {
+        crate::log("Couldn't tie ffmpeg to the app; it may keep running if the app is killed");
+    }
+}
+
+/// Deletes segment folders left behind by earlier runs that didn't shut down cleanly.
+/// Only call this before the first recording starts: it doesn't know which folder is in use.
+pub fn remove_stale_segments() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    for entry in entries.filter_map(|e| e.ok()) {
+        if entry.file_name().to_string_lossy().starts_with("lol_replay_") && entry.path().is_dir() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
     }
 }
 
@@ -111,6 +159,7 @@ impl Recorder {
             .stderr(log)
             .spawn()
             .map_err(|e| format!("couldn't start ffmpeg ({}): {e}", ffmpeg_exe.display()))?;
+        tie_to_app(&child);
 
         crate::log(&format!("Recording started ({}, {encoder}, {} fps, {}p)", s.capture, s.fps, s.height));
         Ok(Self { ffmpeg: ffmpeg_exe.to_path_buf(), dir, child: Mutex::new(Some(child)) })
