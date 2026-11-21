@@ -4,26 +4,31 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use regex::Regex;
 use serde_json::Value;
 
 pub struct LiveClient {
-    http: reqwest::blocking::Client,
+    http: ureq::Agent,
 }
 
 impl LiveClient {
     pub fn new() -> Self {
-        let http = reqwest::blocking::Client::builder()
-            .danger_accept_invalid_certs(true) // the game uses a self-signed certificate
-            .timeout(Duration::from_secs(1))
+        // Windows' own TLS (SChannel). Certificates aren't checked: the game's is self-signed.
+        let tls = ureq::tls::TlsConfig::builder()
+            .provider(ureq::tls::TlsProvider::NativeTls)
+            .disable_verification(true)
+            .build();
+        let http = ureq::Agent::config_builder()
+            .tls_config(tls)
+            .timeout_global(Some(Duration::from_secs(1)))
+            .http_status_as_error(false) // error answers are JSON too; see below
             .build()
-            .expect("http client");
+            .into();
         Self { http }
     }
 
     pub fn get(&self, path: &str) -> Option<Value> {
         let url = format!("https://127.0.0.1:2999/liveclientdata/{path}");
-        let data: Value = self.http.get(url).send().ok()?.json().ok()?;
+        let data: Value = self.http.get(&url).call().ok()?.body_mut().read_json().ok()?;
         // During the loading screen the API answers with an error object.
         if data.get("errorCode").is_some() {
             return None;
@@ -125,8 +130,7 @@ pub fn pretty_killer(name: &str) -> String {
     }
     if let Some(monster) = name.strip_prefix("SRU_") {
         // Other jungle monsters, e.g. "SRU_Gromp13.1.1" -> "Gromp"
-        let trailing = Regex::new(r"[\d.]+$").unwrap();
-        return trailing.replace(monster, "").replace('_', " ");
+        return monster.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.').replace('_', " ");
     }
     without_tag(name).to_string() // champions: drop the Riot ID tag
 }
