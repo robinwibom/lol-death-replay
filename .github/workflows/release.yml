@@ -11,7 +11,34 @@ permissions:
   contents: write
 
 jobs:
+  # ffmpeg does the recording. It's bundled next to the app (GPL build, so the app is GPL too).
+  # This builds a small one with only what the app uses; it's cached until the script changes.
+  ffmpeg:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache ffmpeg
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg.exe
+          key: ffmpeg-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+
+      - name: Build ffmpeg
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends mingw-w64 nasm cmake pkg-config
+          scripts/build-ffmpeg.sh "$PWD/ffmpeg.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg
+          path: ffmpeg.exe
+
   build:
+    needs: ffmpeg
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,16 +52,17 @@ jobs:
         with:
           tool: tauri-cli
 
-      # ffmpeg does the recording. It's bundled next to the app (GPL build, so the app is GPL too).
-      - name: Download ffmpeg
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg
+          path: ${{ runner.temp }}/ffmpeg
+
+      - name: Test ffmpeg
         shell: pwsh
         run: |
-          $zip = "$env:RUNNER_TEMP\ffmpeg.zip"
-          Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile $zip
-          Expand-Archive $zip "$env:RUNNER_TEMP\ffmpeg"
-          $exe = Get-ChildItem "$env:RUNNER_TEMP\ffmpeg" -Recurse -Filter ffmpeg.exe | Select-Object -First 1
           New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
-          Copy-Item $exe.FullName src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
+          Copy-Item "$env:RUNNER_TEMP/ffmpeg/ffmpeg.exe" src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
+          scripts/test-ffmpeg.ps1
 
       - name: Test
         working-directory: src-tauri
