@@ -60,11 +60,12 @@
 
   #title {
     position: absolute;
-    top: 14px;
+    top: 12px; /* 2px higher to make up for the taller line, so the text stays where it was */
     left: 14px;
     max-width: calc(100% - 72px);
     font-size: 12px;
     font-weight: 600;
+    line-height: 1.4; /* the body's line-height of 1 makes overflow: hidden cut off g, y and p */
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
