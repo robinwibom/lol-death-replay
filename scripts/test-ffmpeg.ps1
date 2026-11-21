@@ -13,6 +13,7 @@ function Fail([string]$msg) { Write-Host "FAIL: $msg"; exit 1 }
 # 1. Every component recorder.rs names. "ffmpeg -h <kind>=<name>" prints "Unknown ..." when it's missing.
 $needed = @{
     encoder = 'h264_nvenc', 'h264_amf', 'h264_qsv', 'libx264'
+    decoder = 'wrapped_avframe', 'bmp', 'h264' # lavfi and gdigrab frames; reading segments back
     filter  = 'ddagrab', 'hwdownload', 'format', 'scale', 'color'
     demuxer = 'gdigrab', 'lavfi', 'mpegts'
     muxer   = 'segment', 'mpegts', 'mp4', 'null'
