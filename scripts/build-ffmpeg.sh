@@ -88,7 +88,9 @@ cd ffmpeg
     --enable-muxer=segment,mpegts,null \
     `# saving a clip: concat the segments, copy into .mp4` \
     --enable-protocol=file,pipe,concat --enable-demuxer=mpegts --enable-muxer=mp4 \
-    --enable-decoder=h264 --enable-parser=h264 --enable-bsf=extract_extradata,h264_mp4toannexb
+    --enable-decoder=h264 --enable-parser=h264 --enable-bsf=extract_extradata,h264_mp4toannexb \
+    `# reading an .mp4 back: the app doesn't (the WebView plays clips), test-ffmpeg.ps1 does` \
+    --enable-demuxer=mov
 make -j "$JOBS" >/dev/null
 $HOST-strip ffmpeg.exe
 
