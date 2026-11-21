@@ -72,7 +72,7 @@ pub fn load(app: &AppHandle) -> (Settings, bool) {
         .unwrap_or_default();
     if s.clips_dir.as_os_str().is_empty() {
         let videos = app.path().video_dir().unwrap_or_else(|_| std::env::temp_dir());
-        s.clips_dir = videos.join("LoL Death Replay");
+        s.clips_dir = videos.join("LoLDeathReplay");
     }
     (s, saved.is_none())
 }

@@ -73,13 +73,7 @@ fn last_clip(app: &AppHandle) -> Option<PathBuf> {
     if let Some(clip) = app.state::<AppState>().last_clip.lock().unwrap().clone() {
         return Some(clip);
     }
-    std::fs::read_dir(settings::current(app).clips_dir)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|x| x == "mp4"))
-        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
-        .max()
-        .map(|(_, path)| path)
+    watcher::clips(&settings::current(app).clips_dir).into_iter().max().map(|(_, _, path)| path)
 }
 
 fn replay_last(app: &AppHandle) {

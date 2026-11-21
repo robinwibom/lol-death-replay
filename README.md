@@ -16,7 +16,7 @@ The installer isn't code-signed. Windows SmartScreen may warn about it (choose *
 Start **LoL Death Replay** from the Start menu (or turn on **Start with Windows** in its settings). A gold replay icon appears in the tray; click it for:
 
 - **Replay last death**
-- **Open clips folder** (by default `Videos\LoL Death Replay`)
+- **Open clips folder** (by default `Videos\LoLDeathReplay`)
 - **Settings**
 - **Quit**
 
