@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use regex::Regex;
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
 
@@ -182,8 +181,19 @@ fn unsaved_dir() -> PathBuf {
     std::env::temp_dir().join("LoLDeathReplay_unsaved")
 }
 
+/// Keeps letters, digits, `_` and `-` (ASCII only); each run of anything else becomes one `-`.
 fn safe(s: &str) -> String {
-    let cleaned = Regex::new(r"[^A-Za-z0-9_-]+").unwrap().replace_all(s, "-");
+    let mut cleaned = String::with_capacity(s.len());
+    let mut in_run = false;
+    for c in s.chars() {
+        let keep = c.is_ascii_alphanumeric() || c == '_' || c == '-';
+        if keep {
+            cleaned.push(c);
+        } else if !in_run {
+            cleaned.push('-');
+        }
+        in_run = !keep;
+    }
     let cleaned: String = cleaned.trim_matches('-').chars().take(60).collect();
     if cleaned.is_empty() { "unknown".into() } else { cleaned }
 }
@@ -250,6 +260,16 @@ fn prune(dir: &Path, max_bytes: u64, newest: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safe_names_for_files() {
+        assert_eq!(safe("Miss Fortune"), "Miss-Fortune");
+        assert_eq!(safe("Kai'Sa  (ARAM)"), "Kai-Sa-ARAM"); // a run of several becomes one "-"
+        assert_eq!(safe("a-!b"), "a--b"); // a kept "-" isn't merged with a replaced one
+        assert_eq!(safe("Ñunu & Willump"), "unu-Willump"); // non-ASCII is replaced, edges trimmed
+        assert_eq!(safe("???"), "unknown");
+        assert_eq!(safe(&"x".repeat(80)).len(), 60);
+    }
 
     #[test]
     fn prune_removes_oldest_until_under_limit() {
