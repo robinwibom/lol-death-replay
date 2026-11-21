@@ -15,7 +15,7 @@ $needed = @{
     encoder = 'h264_nvenc', 'h264_amf', 'h264_qsv', 'libx264'
     decoder = 'wrapped_avframe', 'bmp', 'h264' # lavfi and gdigrab frames; reading segments back
     filter  = 'ddagrab', 'hwdownload', 'format', 'scale', 'color'
-    demuxer = 'gdigrab', 'lavfi', 'mpegts'
+    demuxer = 'gdigrab', 'lavfi', 'mpegts', 'mov' # mov: only for this test's clip check
     muxer   = 'segment', 'mpegts', 'mp4', 'null'
 }
 foreach ($kind in $needed.Keys) {
