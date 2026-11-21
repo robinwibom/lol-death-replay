@@ -18,9 +18,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
+      # No build cache: releases are rare, a cold build takes ~6 minutes, and saving the cache hung for an hour.
 
       - name: Install Tauri CLI
         uses: taiki-e/install-action@v2

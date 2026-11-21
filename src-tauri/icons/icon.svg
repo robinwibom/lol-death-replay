@@ -1,18 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#2a2c33"/>
-      <stop offset="1" stop-color="#121317"/>
-    </linearGradient>
-    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#ffd970"/>
-      <stop offset="1" stop-color="#e0a92e"/>
-    </linearGradient>
-  </defs>
-  <rect x="48" y="48" width="928" height="928" rx="208" fill="url(#bg)"/>
-  <!-- replay arrow: an almost-full circle running counterclockwise -->
-  <path d="M300 300 A300 300 0 1 1 212 512" fill="none" stroke="url(#gold)" stroke-width="84" stroke-linecap="round"/>
-  <path d="M190 196 L330 338 L170 360 Z" fill="url(#gold)" stroke="url(#gold)" stroke-width="40" stroke-linejoin="round"/>
-  <!-- play triangle -->
-  <path d="M440 380 L440 644 L656 512 Z" fill="#f4f4f6" stroke="#f4f4f6" stroke-width="44" stroke-linejoin="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <rect width="256" height="256" rx="56" fill="#1b1b1f"/>
+  <g transform="translate(148 116) scale(0.973) translate(-152.0 -101.5)">
+    <circle cx="128" cy="112" r="64" fill="#ece6d8"/><rect x="92" y="150" width="72" height="44" rx="12" fill="#ece6d8"/><circle cx="104" cy="114" r="17" fill="#1b1b1f"/><circle cx="152" cy="114" r="17" fill="#1b1b1f"/><polygon points="128,136 120,152 136,152" fill="#1b1b1f"/><rect x="110" y="172" width="6" height="22" fill="#1b1b1f"/><rect x="125" y="172" width="6" height="22" fill="#1b1b1f"/><rect x="140" y="172" width="6" height="22" fill="#1b1b1f"/>
+    <circle cx="207.9" cy="41.1" r="26" fill="none" stroke="#ff3b47" stroke-width="4" opacity=".45"/>
+    <circle cx="207.9" cy="41.1" r="15" fill="#ff3b47"/>
+  </g>
 </svg>
