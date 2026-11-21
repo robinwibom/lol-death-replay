@@ -81,6 +81,8 @@ cd ffmpeg
     --enable-encoder=h264_nvenc,h264_amf,h264_qsv,libx264 \
     `# capture: ddagrab (default) and gdigrab ("Compatible"); color is the encoder probe's test input` \
     --enable-indev=gdigrab,lavfi \
+    `# their frames arrive "encoded": lavfi as wrapped_avframe, gdigrab as bmp` \
+    --enable-decoder=wrapped_avframe,bmp \
     --enable-filter=ddagrab,hwdownload,format,scale,color,null \
     `# recording: rolling .ts segments` \
     --enable-muxer=segment,mpegts,null \
