@@ -335,7 +335,8 @@
   };
   const step = (frames) => { video.pause(); seek(video.currentTime + frames * FRAME); };
 
-  video.loop = true; // always starts at 1×; the speed menu changes it while watching
+  // Plays once and stops on the last frame; pressing play again starts over (the browser rewinds
+  // an ended video by itself). Always starts at 1×; the speed menu changes it while watching.
   // Autoplay with sound can be blocked; fall back to muted rather than not playing.
   video.play().catch(() => { video.muted = true; video.play(); });
 
