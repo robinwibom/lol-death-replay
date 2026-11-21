@@ -88,7 +88,12 @@ impl Recorder {
             ],
         };
         let pix = if encoder == "libx264" { "yuv420p" } else { "nv12" };
-        let scale = if s.height > 0 { format!("scale=-2:{}:flags=fast_bilinear,", s.height) } else { String::new() };
+        // Never upscale: 1440p on a 1080p screen records at 1080p (ih = the captured height).
+        let scale = if s.height > 0 {
+            format!("scale=-2:'min({},ih)':flags=fast_bilinear,", s.height)
+        } else {
+            String::new()
+        };
         let wrap = ((s.before + s.after) / SEGMENT_SECS) as u32 + 3;
         let log = std::fs::File::create(dir.join("ffmpeg.log")).map_err(|e| e.to_string())?;
 

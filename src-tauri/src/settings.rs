@@ -16,21 +16,23 @@ pub struct Settings {
     pub fps: u32,
     /// Recording height in pixels; 0 records at the monitor's native size.
     pub height: u32,
+    /// Not in the settings window: the main display is recorded unless settings.json says otherwise.
     pub monitor: u32,
-    /// "ddagrab" (fast, default) or "gdigrab" (fallback when replays are black).
+    /// "ddagrab" (fast, default) or "gdigrab". Not in the settings window: the app switches to
+    /// gdigrab by itself for the rest of a game when ddagrab fails.
     pub capture: String,
     /// "auto" or a specific ffmpeg encoder such as "h264_nvenc".
     pub encoder: String,
     /// Pop up the replay window after each death.
     pub auto_play: bool,
-    /// Playback speed the replay window starts at.
-    pub speed: f64,
+    /// Keep each death's clip in `clips_dir`. When off, the replay uses a temporary file instead.
+    pub save_clips: bool,
     /// Replay window size and position, in Windows' scaled pixels. Updated when you move it.
     pub window_width: f64,
     pub window_x: f64,
     pub window_y: f64,
-    /// How many clips to keep; 0 keeps them all.
-    pub keep: usize,
+    /// The clips folder is kept under this size by deleting the oldest clips.
+    pub max_folder_gb: f64,
     pub clips_dir: PathBuf,
 }
 
@@ -45,11 +47,11 @@ impl Default for Settings {
             capture: "ddagrab".into(),
             encoder: "auto".into(),
             auto_play: true,
-            speed: 1.0,
+            save_clips: true,
             window_width: 480.0,
             window_x: 20.0,
             window_y: 60.0,
-            keep: 100,
+            max_folder_gb: 10.0,
             clips_dir: PathBuf::new(),
         }
     }

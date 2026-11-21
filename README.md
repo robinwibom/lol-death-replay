@@ -33,7 +33,7 @@ It closes by itself the next time you die (replaced by the new replay) and when 
 
 ### Settings
 
-How many seconds to keep before and after a death, the replay's starting speed, recording quality (720p to native, 30 or 60 fps), which monitor to record, the clips folder and how many clips to keep. Recording changes apply from the next game.
+Whether to show the replay and whether to save clips (turn both off and it doesn't record at all), how many seconds to keep before and after a death, recording quality (720p to native, 30 or 60 fps), the clips folder and its size limit (oldest clips are deleted first). Recording changes apply from the next game.
 
 ## Troubleshooting
 

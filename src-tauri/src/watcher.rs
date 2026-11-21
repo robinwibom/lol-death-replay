@@ -1,10 +1,10 @@
 //! The background loop: waits for a game, records while it runs, and saves a clip on each death.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use regex::Regex;
 use serde_json::Value;
@@ -22,16 +22,18 @@ pub fn run(app: AppHandle) {
     let mut names = HashSet::new();
     let mut was_dead = false;
     let mut failed = false; // don't retry recording until the next game
+    let mut idle = false; // in a game, but replay and clips are both turned off
+    let mut compatible = false; // fast capture failed this game, so record with gdigrab instead
 
-    set_status(&app, "Waiting for a game");
+    set_status(&app, "Waiting for game");
     loop {
         let Some(active) = client.get("activeplayer") else {
-            if rec.take().is_some() || failed {
+            if rec.take().is_some() || failed || idle {
                 player::close(&app);
                 crate::log("Game over. Waiting for the next one...");
-                set_status(&app, "Waiting for a game");
+                set_status(&app, "Waiting for game");
             }
-            failed = false;
+            (failed, idle, compatible) = (false, false, false);
             thread::sleep(Duration::from_secs(2));
             continue;
         };
@@ -41,7 +43,20 @@ pub fn run(app: AppHandle) {
         }
 
         if rec.is_none() {
-            let s = settings::current(&app);
+            let mut s = settings::current(&app);
+            if compatible {
+                s.capture = "gdigrab".into();
+            }
+            // Nothing to record for. Checked every loop, so turning one back on starts recording.
+            if !s.auto_play && !s.save_clips {
+                if !idle {
+                    set_status(&app, "Replay and clips are off");
+                    idle = true;
+                }
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+            idle = false;
             let encoder = if s.encoder == "auto" {
                 auto_encoder.get_or_insert_with(|| pick_encoder(&ffmpeg, "auto")).clone()
             } else {
@@ -67,6 +82,13 @@ pub fn run(app: AppHandle) {
         let r = rec.as_ref().unwrap();
         if !r.alive() {
             crate::log(&format!("ffmpeg stopped unexpectedly:\n{}", r.error_tail()));
+            if !compatible && settings::current(&app).capture != "gdigrab" {
+                // Desktop Duplication doesn't work on every setup (some dual-GPU laptops, remote desktop).
+                crate::log("Fast capture failed - switching to compatible capture for this game");
+                compatible = true;
+                rec = None;
+                continue;
+            }
             set_status(&app, "Recording failed - see log");
             rec = None;
             failed = true;
@@ -102,11 +124,13 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>) {
         chrono::Local::now().format("%Y-%m-%d_%H%M%S"),
         safe(&killer)
     );
-    if let Err(e) = std::fs::create_dir_all(&s.clips_dir) {
-        crate::log(&format!("Couldn't create {}: {e}", s.clips_dir.display()));
+    // Unsaved replays still need a file to play; they go to a temp folder that only holds the latest.
+    let dir = if s.save_clips { s.clips_dir.clone() } else { unsaved_dir() };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        crate::log(&format!("Couldn't create {}: {e}", dir.display()));
         return;
     }
-    let out = s.clips_dir.join(name);
+    let out = dir.join(name);
     match rec.save_last(s.before + s.after, &out) {
         Ok(()) => {
             crate::log(&format!("Saved {} (killed by {killer})", out.display()));
@@ -114,10 +138,18 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>) {
             if s.auto_play {
                 player::show(&app, &out, &format!("Death at {min}:{sec:02} - killed by {killer}"), s.after);
             }
-            prune(&s.clips_dir, s.keep);
+            if s.save_clips {
+                prune(&dir, (s.max_folder_gb * 1e9) as u64, &out);
+            } else {
+                prune(&dir, 0, &out);
+            }
         }
         Err(e) => crate::log(&format!("Clip save failed: {e}")),
     }
+}
+
+fn unsaved_dir() -> PathBuf {
+    std::env::temp_dir().join("LoL Death Replay (unsaved)")
 }
 
 fn safe(s: &str) -> String {
@@ -126,20 +158,53 @@ fn safe(s: &str) -> String {
     if cleaned.is_empty() { "unknown".into() } else { cleaned }
 }
 
-/// Deletes the oldest clips so at most `keep` remain (0 keeps everything).
-fn prune(dir: &Path, keep: usize) {
-    if keep == 0 {
-        return;
-    }
+/// Deletes the oldest clips until the folder's clips total at most `max_bytes`.
+/// `newest` (the clip just saved) is never deleted, even if it alone is over the limit.
+fn prune(dir: &Path, max_bytes: u64, newest: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
-    let mut clips: Vec<_> = entries
+    let mut clips: Vec<(SystemTime, u64, PathBuf)> = entries
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().is_some_and(|x| x == "mp4"))
-        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            Some((meta.modified().ok()?, meta.len(), e.path()))
+        })
         .collect();
-    clips.sort();
-    let excess = clips.len().saturating_sub(keep);
-    for (_, path) in clips.into_iter().take(excess) {
-        let _ = std::fs::remove_file(path);
+    clips.sort(); // oldest first
+    let mut total: u64 = clips.iter().map(|(_, size, _)| size).sum();
+    for (_, size, path) in clips {
+        if total <= max_bytes {
+            break;
+        }
+        if path != newest && std::fs::remove_file(&path).is_ok() {
+            total -= size;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prune_removes_oldest_until_under_limit() {
+        let dir = std::env::temp_dir().join(format!("prune_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = SystemTime::now();
+        let mut paths = vec![];
+        for i in 0..4u64 {
+            let path = dir.join(format!("clip{i}.mp4"));
+            let f = std::fs::File::create(&path).unwrap();
+            f.set_len(100).unwrap();
+            f.set_modified(now - Duration::from_secs(100 - i)).unwrap(); // clip0 is the oldest
+            paths.push(path);
+        }
+        prune(&dir, 250, &paths[3]);
+        let left: Vec<bool> = paths.iter().map(|p| p.exists()).collect();
+        assert_eq!(left, [false, false, true, true]);
+
+        prune(&dir, 0, &paths[3]); // limit 0: only the newest survives
+        assert!(!paths[2].exists() && paths[3].exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -19,7 +19,6 @@ pub fn show(app: &AppHandle, clip: &Path, title: &str, death_from_end: f64) {
     url.query_pairs_mut()
         .append_pair("clip", &clip.to_string_lossy())
         .append_pair("title", title)
-        .append_pair("speed", &s.speed.to_string())
         .append_pair("death", &death_from_end.to_string());
     let page = format!("player.html?{}", url.query().unwrap_or_default());
 

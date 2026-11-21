@@ -6,16 +6,23 @@
 <title>LoL Death Replay</title>
 <style>
   :root {
+    color-scheme: light dark; /* native popups, scrollbars and caret follow the theme */
     --bg: #f5f5f7;
     --card: #ffffff;
     --fg: #1c1c1e;
     --muted: #6e6e73;
     --line: rgba(0, 0, 0, 0.08);
-    --field: #f0f0f2;
+    --field: #ececef;
+    --thumb: #ffffff;
+    --thumb-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+    --hover: rgba(0, 0, 0, 0.05);
     --accent: #d9a21b;
-    --accent-fg: #1c1c1e;
     --ok: #2f9e5b;
-    --ease: cubic-bezier(0.23, 1, 0.32, 1);
+    --danger: #d93036;
+    --toast: #1c1c1e;
+    --toast-fg: #f5f5f7;
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -25,8 +32,14 @@
       --muted: #9a9aa1;
       --line: rgba(255, 255, 255, 0.08);
       --field: #2b2b2f;
+      --thumb: #45454b;
+      --thumb-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+      --hover: rgba(255, 255, 255, 0.06);
       --accent: #f5c542;
       --ok: #4cc27f;
+      --danger: #ff5c61;
+      --toast: #f2f2f3;
+      --toast-fg: #161618;
     }
   }
   * { box-sizing: border-box; margin: 0; }
@@ -34,69 +47,178 @@
   body {
     color: var(--fg);
     font: 14px/1.4 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
-    padding: 20px 16px 24px;
+    padding: 20px 16px 64px; /* room for the toast */
     max-width: 560px;
     margin: 0 auto;
     -webkit-font-smoothing: antialiased;
+    user-select: none; /* an app, not a document */
+    cursor: default;
   }
-  header { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+  ::-webkit-scrollbar { width: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 5px; border: 3px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+  button, input, select { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  :focus:not(:focus-visible) { outline: none; }
+
+  /* ---- header ---- */
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
   header img { width: 40px; height: 40px; }
   header h1 { font-size: 17px; font-weight: 600; }
   .status { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12.5px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); transition: background-color 0.3s ease; }
   .status.recording .dot { background: #e5383b; animation: pulse 1.6s ease-in-out infinite; }
   .status.waiting .dot { background: var(--ok); }
   @keyframes pulse { 50% { opacity: 0.35; } }
 
-  h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 18px 4px 8px; }
+  /* ---- sections ---- */
+  h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 20px 4px 8px; }
   .card { background: var(--card); border-radius: 10px; box-shadow: 0 0 0 1px var(--line); }
-  .row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 14px; min-height: 48px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 14px; min-height: 52px; }
   .row + .row { border-top: 1px solid var(--line); }
-  .row label, .row .label { flex: 1; min-width: 0; }
-  .hint { display: block; color: var(--muted); font-size: 12px; margin-top: 1px; }
+  .row .label { flex: 1; min-width: 0; }
+  .path { display: block; margin-top: 1px; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; }
 
-  select, input[type="number"] {
-    font: inherit;
-    color: inherit;
-    background: var(--field);
-    border: 0;
-    border-radius: 6px;
-    padding: 5px 8px;
-    min-width: 96px;
+  /* ---- buttons: everything pressable scales down slightly ---- */
+  button { border: 0; cursor: pointer; transition: transform 0.16s var(--ease-out), background-color 0.15s ease; }
+  button:active:not(:disabled) { transform: scale(0.97); }
+  .btn { background: var(--field); border-radius: 7px; padding: 6px 12px; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
+  .btn svg { flex: none; }
+  .buttons { display: flex; gap: 6px; flex: none; }
+  .link { background: none; padding: 0; color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }
+  @media (hover: hover) and (pointer: fine) {
+    .btn:hover { background: color-mix(in srgb, var(--field) 100%, var(--fg) 8%); }
+    .link:hover { color: var(--fg); }
   }
-  input[type="number"] { width: 84px; min-width: 0; text-align: right; }
-  select:focus-visible, input:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-  /* Toggle switch */
+  /* ---- segmented control: a thumb slides to the chosen option ---- */
+  .seg {
+    position: relative;
+    display: inline-grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    flex: none;
+    padding: 2px;
+    border-radius: 8px;
+    background: var(--field);
+  }
+  .seg button {
+    position: relative;
+    z-index: 1;
+    background: none;
+    padding: 5px 9px;
+    border-radius: 6px;
+    color: var(--muted);
+    font-size: 13px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    transition: color 0.15s ease, transform 0.16s var(--ease-out);
+  }
+  .seg button[aria-checked="true"] { color: var(--fg); font-weight: 600; }
+  /* An invisible bold copy of the label reserves the bold width, so selecting never resizes the control. */
+  .seg button::after { content: attr(data-label); display: block; height: 0; overflow: hidden; visibility: hidden; font-weight: 600; }
+  @media (hover: hover) and (pointer: fine) { .seg button[aria-checked="false"]:hover { color: var(--fg); } }
+  .seg-thumb {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    left: 2px;
+    border-radius: 6px;
+    background: var(--thumb);
+    box-shadow: var(--thumb-shadow);
+    transition: transform 0.22s var(--ease-in-out);
+  }
+  .seg.instant .seg-thumb { transition: none; }
+
+  /* ---- stepper: − value + ---- */
+  .stepper { display: inline-flex; align-items: center; flex: none; padding: 2px; border-radius: 8px; background: var(--field); }
+  .stepper button {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    background: none;
+    display: grid;
+    place-items: center;
+    color: var(--fg);
+  }
+  .stepper button:disabled { color: var(--muted); opacity: 0.4; cursor: default; }
+  @media (hover: hover) and (pointer: fine) { .stepper button:hover:not(:disabled) { background: var(--hover); } }
+  .stepper input {
+    width: 44px;
+    border: 0;
+    background: none;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    padding: 4px 0;
+    border-radius: 5px;
+    user-select: text;
+  }
+  .stepper input::-webkit-inner-spin-button, .stepper input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  /* Value with a unit: the number sizes to its digits and "10 GB" is centered as one piece. */
+  .stepper .value { width: 56px; display: flex; justify-content: center; align-items: baseline; gap: 3px; }
+  .stepper .value input { width: auto; min-width: 1ch; field-sizing: content; }
+  .stepper .unit { color: var(--muted); font-size: 12.5px; }
+
+  /* ---- toggle switch ---- */
   .switch { position: relative; width: 40px; height: 24px; flex: none; }
   .switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
-  .switch span { position: absolute; inset: 0; border-radius: 12px; background: var(--field); box-shadow: inset 0 0 0 1px var(--line); transition: background 0.2s ease; pointer-events: none; }
-  .switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3); transition: transform 0.2s var(--ease); }
-  .switch input:checked + span { background: var(--accent); }
-  .switch input:checked + span::after { transform: translateX(16px); }
-
-  button {
-    font: inherit;
-    color: inherit;
-    background: var(--field);
-    border: 0;
-    border-radius: 6px;
-    padding: 5px 12px;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: transform 0.12s var(--ease), filter 0.15s ease;
+  .switch span { position: absolute; inset: 0; border-radius: 12px; background: var(--field); box-shadow: inset 0 0 0 1px var(--line); transition: background-color 0.2s ease; pointer-events: none; }
+  .switch span::after {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 18px;
+    height: 18px;
+    border-radius: 9px;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+    transform-origin: left center;
+    transition: transform 0.22s var(--ease-out);
   }
-  button:hover { filter: brightness(0.96); }
-  @media (prefers-color-scheme: dark) { button:hover { filter: brightness(1.15); } }
-  button:active { transform: scale(0.97); }
-  .path { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; margin-top: 1px; }
-  .buttons { display: flex; gap: 6px; flex: none; }
+  .switch input:checked + span { background: var(--accent); }
+  .switch input:checked + span::after { transform: translateX(16px); transform-origin: right center; }
+  /* While pressed, the knob stretches toward where it will go. */
+  .switch input:active + span::after { transform: scaleX(1.2); }
+  .switch input:checked:active + span::after { transform: translateX(16px) scaleX(1.2); }
+  .switch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-  footer { display: flex; justify-content: space-between; align-items: center; margin-top: 18px; padding: 0 4px; color: var(--muted); font-size: 12px; }
-  .link { background: none; padding: 0; color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }
-  #saved { opacity: 0; transition: opacity 0.25s ease; color: var(--ok); }
-  #saved.show { opacity: 1; }
-  #error { color: #e5383b; }
+  footer { display: flex; justify-content: space-between; align-items: center; margin-top: 20px; padding: 0 4px; color: var(--muted); font-size: 12px; }
+
+  /* ---- toast: always in view, enters a little slower than it leaves ---- */
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: max-content;
+    max-width: min(340px, calc(100vw - 32px));
+    padding: 7px 14px 7px 10px;
+    border-radius: 16px; /* a pill on one line, still calm when an error wraps to two */
+    background: var(--toast);
+    color: var(--toast-fg);
+    font-size: 12.5px;
+    font-weight: 600;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+    opacity: 0;
+    transform: translate(-50%, 8px) scale(0.96);
+    transition: opacity 0.15s ease, transform 0.15s var(--ease-out);
+    pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0) scale(1); transition-duration: 0.22s; }
+  .toast.error { background: var(--danger); color: #fff; }
+  .toast .icon-error, .toast.error .icon-ok { display: none; }
+  .toast.error .icon-error { display: block; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .status.recording .dot { animation: none; }
+    .seg-thumb, .switch span::after { transition: none; }
+    .toast, .toast.show { transform: translate(-50%, 0); }
+  }
 </style>
 </head>
 <body>
@@ -104,129 +226,200 @@
     <img src="icon.png" alt="">
     <div>
       <h1>LoL Death Replay</h1>
-      <div id="status" class="status"><span class="dot"></span><span id="status-text">Starting...</span></div>
+      <div id="status" class="status" aria-live="polite"><span class="dot"></span><span id="status-text">Starting...</span></div>
     </div>
   </header>
 
   <h2>Replay</h2>
   <div class="card">
     <div class="row">
-      <label for="autoPlay">Show replay after each death<span class="hint">Clips are saved either way</span></label>
+      <label class="label" for="autoPlay">Show replay after each death</label>
       <span class="switch"><input type="checkbox" id="autoPlay"><span></span></span>
     </div>
     <div class="row">
-      <label for="before">Seconds before death</label>
-      <input type="number" id="before" min="5" max="60" step="1">
+      <label class="label" for="before">Seconds before death</label>
+      <div class="stepper"><button data-step="-1" aria-label="Fewer seconds"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6h7"/></svg></button><input type="number" id="before" min="5" max="60" step="1"><button data-step="1" aria-label="More seconds"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6h7M6 2.5v7"/></svg></button></div>
     </div>
     <div class="row">
-      <label for="after">Seconds after death</label>
-      <input type="number" id="after" min="0" max="10" step="1">
+      <label class="label" for="after">Seconds after death</label>
+      <div class="stepper"><button data-step="-1" aria-label="Fewer seconds"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6h7"/></svg></button><input type="number" id="after" min="0" max="10" step="1"><button data-step="1" aria-label="More seconds"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6h7M6 2.5v7"/></svg></button></div>
     </div>
     <div class="row">
-      <label for="speed">Start at speed<span class="hint">You can change it in the replay window too</span></label>
-      <select id="speed">
-        <option value="0.25">0.25×</option>
-        <option value="0.5">0.5×</option>
-        <option value="0.75">0.75×</option>
-        <option value="1">Normal</option>
-        <option value="1.5">1.5×</option>
-        <option value="2">2×</option>
-      </select>
-    </div>
-    <div class="row">
-      <span class="label">Replay window<span class="hint">Move or resize it and it opens there next time</span></span>
-      <button id="test">Replay last death</button>
+      <span class="label">Last death</span>
+      <button class="btn" id="test"><svg width="10" height="12" viewBox="0 0 10 12" fill="currentColor"><path d="M1 1.2v9.6a.8.8 0 0 0 1.2.7l7.4-4.8a.8.8 0 0 0 0-1.4L2.2.5A.8.8 0 0 0 1 1.2z"/></svg>Replay</button>
     </div>
   </div>
 
-  <h2>Recording <span style="text-transform:none;letter-spacing:0;font-weight:400">· changes apply from the next game</span></h2>
+  <h2>Recording</h2>
   <div class="card">
     <div class="row">
-      <label for="height">Quality<span class="hint">Lower is lighter on your PC</span></label>
-      <select id="height">
-        <option value="720">720p</option>
-        <option value="1080">1080p</option>
-        <option value="1440">1440p</option>
-        <option value="0">Native</option>
-      </select>
+      <span class="label">Quality</span>
+      <div class="seg" data-key="height" role="radiogroup" aria-label="Quality">
+        <button data-value="720">720p</button><button data-value="1080">1080p</button><button data-value="1440">1440p</button><button data-value="0">Native</button>
+      </div>
     </div>
     <div class="row">
-      <label for="fps">Frame rate</label>
-      <select id="fps">
-        <option value="30">30 fps</option>
-        <option value="60">60 fps</option>
-      </select>
-    </div>
-    <div class="row">
-      <label for="capture">Capture method<span class="hint">Try Compatible if replays are black</span></label>
-      <select id="capture">
-        <option value="ddagrab">Fast</option>
-        <option value="gdigrab">Compatible</option>
-      </select>
-    </div>
-    <div class="row">
-      <label for="monitor">Monitor<span class="hint">0 is your main monitor</span></label>
-      <input type="number" id="monitor" min="0" max="8" step="1">
+      <span class="label">Frame rate</span>
+      <div class="seg" data-key="fps" role="radiogroup" aria-label="Frame rate">
+        <button data-value="30">30 fps</button><button data-value="60">60 fps</button>
+      </div>
     </div>
   </div>
 
   <h2>Clips</h2>
   <div class="card">
     <div class="row">
-      <span class="label">Folder<span class="path" id="clipsDir"></span></span>
-      <span class="buttons"><button id="open">Open</button><button id="change">Change...</button></span>
+      <label class="label" for="saveClips">Save clips</label>
+      <span class="switch"><input type="checkbox" id="saveClips"><span></span></span>
     </div>
     <div class="row">
-      <label for="keep">Keep newest<span class="hint">Older clips are deleted. 0 keeps them all</span></label>
-      <input type="number" id="keep" min="0" max="10000" step="10">
+      <span class="label">Folder<span class="path" id="clipsDir"></span></span>
+      <span class="buttons"><button class="btn" id="open">Open</button><button class="btn" id="change">Change...</button></span>
+    </div>
+    <div class="row">
+      <label class="label" for="maxFolderGb">Folder size limit</label>
+      <div class="stepper"><button data-step="-1" aria-label="Smaller limit"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6h7"/></svg></button><span class="value"><input type="number" id="maxFolderGb" min="1" max="1000" step="1"><span class="unit">GB</span></span><button data-step="1" aria-label="Larger limit"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6h7M6 2.5v7"/></svg></button></div>
     </div>
   </div>
 
   <h2>General</h2>
   <div class="card">
     <div class="row">
-      <label for="startWithWindows">Start with Windows<span class="hint">Runs quietly in the tray, ready for your next game</span></label>
+      <label class="label" for="startWithWindows">Start with Windows</label>
       <span class="switch"><input type="checkbox" id="startWithWindows"><span></span></span>
     </div>
   </div>
 
   <footer>
     <span id="version"></span>
-    <span><span id="saved">Saved</span><span id="error"></span></span>
     <button class="link" id="log">Open log</button>
   </footer>
+
+  <div id="toast" class="toast" role="status" aria-live="polite">
+    <svg class="icon-ok" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.2l2.6 2.6L11 4.4"/></svg>
+    <svg class="icon-error" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M7 3.5v4M7 10.2v.1"/></svg>
+    <span id="toast-text">Saved</span>
+  </div>
 
 <script>
   const { invoke } = window.__TAURI__.core;
   const $ = (id) => document.getElementById(id);
-  const NUMBERS = ['before', 'after', 'speed', 'height', 'fps', 'monitor', 'keep'];
+  const STEPPERS = ['before', 'after', 'maxFolderGb'];
   let settings = null;
 
-  function fill() {
-    for (const key of NUMBERS) $(key).value = String(settings[key]);
-    $('capture').value = settings.capture;
-    $('autoPlay').checked = settings.autoPlay;
-    $('clipsDir').textContent = settings.clipsDir;
-    $('clipsDir').title = settings.clipsDir;
+  // ---- toast ----
+  let toastTimer;
+  function toast(text, isError = false) {
+    $('toast-text').textContent = text;
+    $('toast').classList.toggle('error', isError);
+    $('toast').classList.add('show');
+    clearTimeout(toastTimer);
+    // Errors stay until the next successful save; confirmations fade on their own.
+    if (!isError) toastTimer = setTimeout(() => $('toast').classList.remove('show'), 1600);
   }
 
-  let savedTimer;
+  let saveTimer;
+  function saveSoon() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(save, 250); // a burst of +/+/+ clicks becomes one save
+  }
   async function save() {
-    for (const key of NUMBERS) {
-      const v = Number($(key).value);
-      if (Number.isFinite(v) && v >= 0) settings[key] = v;
-    }
-    settings.capture = $('capture').value;
-    settings.autoPlay = $('autoPlay').checked;
     try {
       await invoke('save_settings', { new: settings, startWithWindows: $('startWithWindows').checked });
-      $('error').textContent = '';
-      $('saved').classList.add('show');
-      clearTimeout(savedTimer);
-      savedTimer = setTimeout(() => $('saved').classList.remove('show'), 1400);
+      toast('Saved');
     } catch (e) {
-      $('error').textContent = String(e);
+      toast(String(e), true);
+      // Don't leave a switch showing a change that didn't happen.
+      $('startWithWindows').checked = (await invoke('get_info')).startWithWindows;
     }
+  }
+
+  // ---- segmented controls ----
+  function selectSeg(seg, instant) {
+    const buttons = [...seg.querySelectorAll('button')];
+    // The closest option wins, so a value that isn't one of the options still shows sensibly.
+    const current = Number(settings[seg.dataset.key]);
+    const distance = (b) => Math.abs(Number(b.dataset.value) - current);
+    const index = buttons.indexOf(buttons.reduce((best, b) => (distance(b) < distance(best) ? b : best)));
+    buttons.forEach((b, i) => b.setAttribute('aria-checked', String(i === index)));
+    const thumb = seg.querySelector('.seg-thumb');
+    seg.classList.toggle('instant', instant);
+    // Set the thumb's own transform (not a CSS variable on the parent) so only it restyles.
+    thumb.style.width = `${buttons[0].offsetWidth}px`;
+    thumb.style.transform = `translateX(${buttons[index].offsetLeft - buttons[0].offsetLeft}px)`;
+  }
+  for (const seg of document.querySelectorAll('.seg')) {
+    seg.insertAdjacentHTML('beforeend', '<span class="seg-thumb" aria-hidden="true"></span>');
+    for (const button of seg.querySelectorAll('button')) {
+      button.setAttribute('role', 'radio');
+      button.dataset.label = button.textContent; // feeds the width-reserving ::after
+      button.addEventListener('click', (e) => {
+        const raw = button.dataset.value;
+        settings[seg.dataset.key] = Number(raw);
+        selectSeg(seg, e.detail === 0); // keyboard (Enter/Space) clicks have detail 0: no animation
+        saveSoon();
+      });
+    }
+  }
+
+  // ---- steppers ----
+  /**
+   * Turns what the user typed into the value to show. Called when a stepper's field loses focus
+   * or Enter is pressed. `input.value` is a string ('' when the field is empty or not a number);
+   * input.min / input.max / input.step are strings from the HTML; `previous` is the number the
+   * field showed before this edit. Returns the number to show (and save).
+   */
+  function normalize(input, previous) {
+    // TODO(human): decide what happens to out-of-range or invalid input
+    return Number(input.value);
+  }
+
+  const stepperButtons = (input) => input.closest('.stepper').querySelectorAll('button');
+
+  function syncStepper(input) {
+    input.value = String(settings[input.id]);
+    const [less, more] = stepperButtons(input);
+    less.disabled = settings[input.id] <= Number(input.min);
+    more.disabled = settings[input.id] >= Number(input.max);
+  }
+  for (const id of STEPPERS) {
+    const input = $(id);
+    const commit = () => {
+      settings[id] = normalize(input, settings[id]);
+      syncStepper(input);
+      saveSoon();
+    };
+    input.addEventListener('change', commit);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') input.blur(); });
+    for (const button of stepperButtons(input)) {
+      // Press and hold repeats, speeding up the longer you hold.
+      let repeat;
+      const step = () => {
+        const next = settings[id] + Number(button.dataset.step) * Number(input.step);
+        settings[id] = Math.min(Number(input.max), Math.max(Number(input.min), next));
+        syncStepper(input);
+        saveSoon();
+      };
+      const stop = () => clearTimeout(repeat);
+      button.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0 || button.disabled) return;
+        step();
+        let delay = 380;
+        const again = () => { step(); delay = Math.max(50, delay * 0.8); repeat = setTimeout(again, delay); };
+        repeat = setTimeout(again, delay);
+      });
+      for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) button.addEventListener(ev, stop);
+      button.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); step(); } });
+    }
+  }
+
+  function fill() {
+    for (const id of STEPPERS) syncStepper($(id));
+    for (const seg of document.querySelectorAll('.seg')) selectSeg(seg, true);
+    $('autoPlay').checked = settings.autoPlay;
+    $('saveClips').checked = settings.saveClips;
+    $('clipsDir').textContent = settings.clipsDir;
+    $('clipsDir').title = settings.clipsDir;
   }
 
   async function refreshStatus() {
@@ -246,7 +439,9 @@
     setInterval(refreshStatus, 2000);
   })();
 
-  for (const el of document.querySelectorAll('input, select')) el.addEventListener('change', save);
+  $('autoPlay').addEventListener('change', () => { settings.autoPlay = $('autoPlay').checked; saveSoon(); });
+  $('saveClips').addEventListener('change', () => { settings.saveClips = $('saveClips').checked; saveSoon(); });
+  $('startWithWindows').addEventListener('change', saveSoon);
   $('open').addEventListener('click', () => invoke('open_clips_folder'));
   $('log').addEventListener('click', () => invoke('open_log'));
   $('test').addEventListener('click', () => invoke('preview_player'));
@@ -255,7 +450,7 @@
     if (dir) {
       settings.clipsDir = dir;
       fill();
-      save();
+      saveSoon();
     }
   });
 </script>
