@@ -239,8 +239,8 @@
 </style>
 </head>
 <body class="paused">
-  <video id="video" src="/clip.mp4" playsinline preload="auto"></video>
-  <div id="surface" class="pywebview-drag-region"></div>
+  <video id="video" playsinline preload="auto"></video>
+  <div id="surface"></div>
 
   <div class="shade top"></div>
   <div class="shade bottom"></div>
@@ -308,13 +308,15 @@
   let aspect = 16 / 9;
   let zoneStart = 1;  // fraction of the clip where the death zone starts; 1 = no zone
 
-  // Python side (player.py). Outside pywebview, e.g. in a browser, calls just never resolve.
-  const bridge = new Promise((resolve) => {
-    if (window.pywebview?.api) resolve(window.pywebview.api);
-    else window.addEventListener('pywebviewready', () => resolve(window.pywebview.api));
-  });
-  const call = (name, ...args) => bridge.then((api) => api[name](...args));
-  const close = () => call('close');
+  // Rust side (src-tauri/src/player.rs). Opened in a plain browser for testing, calls do nothing.
+  const tauri = window.__TAURI__;
+  const call = (cmd, args) => (tauri ? tauri.core.invoke(cmd, args) : Promise.resolve());
+  const close = () => call('player_close');
+  video.src = tauri ? tauri.core.convertFileSrc(params.get('clip')) : '/clip.mp4';
+  const uiLog = (msg) => call('ui_log', { msg: `Replay window: ${msg}` });
+  video.addEventListener('error', () => uiLog(`can't play ${params.get('clip')} (${video.error?.message || video.error?.code})`));
+  video.addEventListener('loadedmetadata', () => uiLog(`playing ${video.videoWidth}x${video.videoHeight}, ${video.duration.toFixed(1)}s`), { once: true });
+  window.addEventListener('error', (e) => uiLog(e.message));
 
   const title = params.get('title') || 'Death replay';
   document.title = title;
@@ -343,7 +345,7 @@
   video.addEventListener('loadedmetadata', () => {
     if (video.videoWidth && video.videoHeight) {
       aspect = video.videoWidth / video.videoHeight;
-      if (Math.abs(aspect - 16 / 9) > 0.01) call('fit', aspect);
+      if (Math.abs(aspect - 16 / 9) > 0.01) call('player_fit', { aspect });
     }
     const deathFromEnd = parseFloat(params.get('death')) || 0;
     if (deathFromEnd > 0 && video.duration > deathFromEnd) {
@@ -371,10 +373,19 @@
   $('close').addEventListener('click', close);
 
   // Click (not drag) on the video toggles play.
+  // Dragging it moves the window (handed to Windows once the mouse moves a few pixels).
   let downAt = null;
-  $('surface').addEventListener('pointerdown', (e) => { downAt = [e.screenX, e.screenY]; });
-  $('surface').addEventListener('click', (e) => {
-    if (downAt && Math.hypot(e.screenX - downAt[0], e.screenY - downAt[1]) < 4) togglePlay();
+  $('surface').addEventListener('pointerdown', (e) => {
+    if (e.button === 0) downAt = [e.screenX, e.screenY];
+  });
+  $('surface').addEventListener('pointermove', (e) => {
+    if (downAt && Math.hypot(e.screenX - downAt[0], e.screenY - downAt[1]) >= 4) {
+      downAt = null;
+      tauri?.window.getCurrentWindow().startDragging();
+    }
+  });
+  $('surface').addEventListener('pointerup', () => {
+    if (downAt) togglePlay();
     downAt = null;
   });
 
@@ -462,7 +473,7 @@
         const [w, h] = next;
         next = null;
         busy = true;
-        call('resize', w, h, anchor).finally(() => { busy = false; flush(); });
+        call('player_resize', { width: w, height: h, anchor }).finally(() => { busy = false; flush(); });
       };
       const move = (ev) => {
         const dx = ev.screenX - sx, dy = ev.screenY - sy;

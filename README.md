@@ -1,51 +1,70 @@
 # LoL Death Replay
 
-When you die in League, this pops up a small looping replay player in the top-left corner, showing the 15 seconds leading up to your death, so you can review what went wrong while you wait to respawn. Every death is also saved to the `clips` folder (named with game time and who killed you) for reviewing later.
+When you die in League of Legends, a small replay window pops up over the game and loops the 15 seconds leading up to your death, so you can see what went wrong while you wait to respawn. Every death is also saved as a clip, named with the game time and who killed you.
 
-## Setup (once)
+It runs quietly in the system tray. It starts recording when a match begins and stops when it ends.
 
-1. **Python**: install from python.org (tick "Add Python to PATH"), or `winget install Python.Python.3.12`
-2. **ffmpeg** (does the recording + replay window): open a terminal and run
-   `winget install Gyan.FFmpeg`
-   then close and reopen the terminal.
-3. **pywebview** (draws the replay window): run
-   `python -m pip install pywebview`
-4. In League settings → Video, set **Window Mode: Borderless**, so the replay window can appear on top of the game.
+## Install
+
+1. Download the installer (`LoL Death Replay_x.y.z_x64-setup.exe`) from the [latest release](../../releases/latest) and run it. Everything it needs, ffmpeg included, comes with it.
+2. In League, set **Settings → Video → Window Mode** to **Borderless**, so the replay can appear on top of the game.
+
+The installer isn't code-signed. Windows SmartScreen may warn about it (choose **More info → Run anyway**), and PCs with **Smart App Control** turned on will block it.
 
 ## Use
 
-Double-click the **LoL Death Replay** shortcut before (or during) a game. (`start.bat` does the same, but Windows' Smart App Control blocks it if the file came from the internet; the shortcut gets through because it starts Python directly.) It waits for a match to start, records in the background, and stops on its own when the game ends. Leave it running between games.
+Start **LoL Death Replay** from the Start menu (or turn on **Start with Windows** in its settings). A gold replay icon appears in the tray; click it for:
 
-The replay window stays on top of the game and never takes your keyboard away from it. Move the mouse over it to show the controls:
+- **Replay last death**
+- **Open clips folder** (by default `Videos\LoL Death Replay`)
+- **Settings**
+- **Quit**
 
-- **Drag the video** to move the window, and drag any **edge or corner** to resize it. Click the video to pause or play it.
-- **Timeline**: drag it to scrub through the clip. The gold **DEATH** section at the end is the interesting part: from about 3 seconds before you died to the end of the clip.
-- **Bottom row**: back 5s, play/pause and forward 5s in the middle; playback speed (0.25× to 2×) on the right. Clips have no sound.
+### The replay window
+
+It stays on top of the game and never takes your keyboard away from it. Move the mouse over it to show the controls:
+
+- **Drag the video** to move the window, and drag any **edge or corner** to resize it. It opens in the same place next time. Click the video to pause or play.
+- **Timeline**: drag to scrub. The gold **DEATH** section at the end is the interesting part: from about 3 seconds before you died to the end of the clip.
+- **Bottom row**: back 5s, play/pause and forward 5s; playback speed (0.25× to 2×) on the right. Clips have no sound.
 - **X** (top right) closes it. **Ctrl+Shift+X** also closes it from inside the game.
 
-The window closes by itself the next time you die (replaced by the new replay).
+It closes by itself the next time you die (replaced by the new replay) and when the game ends.
 
-## Options
+### Settings
 
-Right-click the shortcut → **Properties** and add any of these to the end of **Target** (or to the line in `start.bat`):
-
-| Option | What it does |
-|---|---|
-| `--before 20` | Show 20 seconds before death instead of 15 |
-| `--speed 0.5` | Start replays in slow motion (you can change it in the window too) |
-| `--no-play` | Don't pop up the replay, just save clips |
-| `--window-width 640` | Make the replay window bigger (default 480, follows Windows display scaling) |
-| `--window-x 1400 --window-y 100` | Move the replay window (default 20, 60 from the top-left corner) |
-| `--height 720` | Record at 720p (default 1080p; 720p is lighter on your PC) |
-| `--fps 60` | Smoother replays (more load) |
-| `--monitor 1` | Record your second monitor |
-| `--keep 0` | Never delete old clips (default keeps the newest 100) |
+How many seconds to keep before and after a death, the replay's starting speed, recording quality (720p to native, 30 or 60 fps), which monitor to record, the clips folder and how many clips to keep. Recording changes apply from the next game.
 
 ## Troubleshooting
 
-- **Replay is black**: add `--capture gdigrab` to the shortcut's Target, and check that the game is in Borderless mode.
-- **Game stutters**: the tool picks your GPU's video encoder automatically (NVIDIA/AMD/Intel). If it falls back to the CPU (`libx264` in the startup line), try `--height 720`, or `--fps 24 --height 600` if it still stutters.
+- **Replays are black**: set **Capture method** to **Compatible**, and check the game is in Borderless mode.
+- **The game stutters**: lower **Quality** to 720p. The app uses your graphics card's video encoder (NVIDIA, AMD or Intel); the log says which one.
 - **Replay doesn't appear over the game**: use Borderless mode; true fullscreen hides other windows.
-- **Clips open in your normal video player instead of the floating window**: pywebview isn't installed (see Setup step 3).
+- Anything else: **Settings → Open log**.
 
-Deaths are detected with Riot's official Live Client Data API, which the game serves locally. The tool only reads that API and records your screen, the same way OBS does. It doesn't touch the game client.
+## How it works
+
+Deaths are detected with Riot's official [Live Client Data API](https://developer.riotgames.com/docs/lol#game-client-api), which the game serves on `https://127.0.0.1:2999` during a match. The app only reads that API and records your screen with ffmpeg, the same way OBS does. It never touches the game client.
+
+While a match runs, ffmpeg keeps a rolling buffer of 1-second segments. On a death, the app waits 2 seconds, joins the last 17 seconds into an `.mp4` and opens it in the replay window.
+
+## Building from source
+
+Needs [Rust](https://rustup.rs), the Visual Studio C++ Build Tools, and the Tauri CLI (`cargo install tauri-cli --version "^2" --locked`).
+
+1. Put an `ffmpeg.exe` at `src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe` (any recent Windows build, e.g. from [BtbN](https://github.com/BtbN/FFmpeg-Builds/releases)).
+2. Run it: `cd src-tauri` then `cargo run`
+3. Build the installer: `cargo tauri build` (output in `src-tauri/target/release/bundle/nsis/`)
+
+Releases are built by GitHub Actions: push a tag like `v0.1.0` and `.github/workflows/release.yml` publishes the installer.
+
+Layout:
+
+- `src-tauri/src/`: the Rust app. `watcher.rs` is the main loop, `recorder.rs` drives ffmpeg, `live_client.rs` talks to the game, `player.rs` opens the replay window, `settings.rs` stores settings.
+- `ui/`: `player.html` (replay window) and `settings.html`.
+
+## License
+
+GPL-3.0. The installer bundles a GPL build of [ffmpeg](https://ffmpeg.org).
+
+League of Legends is a trademark of Riot Games, Inc. This project isn't endorsed by or affiliated with Riot Games.
