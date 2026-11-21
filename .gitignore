@@ -12,5 +12,6 @@ __pycache__/
 target/
 src-tauri/gen/
 
-# ffmpeg is downloaded at build time (see .github/workflows/release.yml), not committed
+# ffmpeg is built by scripts/build-ffmpeg.sh, not committed
 src-tauri/binaries/
+target-ffmpeg/
