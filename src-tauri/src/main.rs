@@ -58,6 +58,19 @@ pub fn set_status(app: &AppHandle, status: &str) {
     let _ = state.status_item.set_text(status);
 }
 
+/// Registers Ctrl+Shift+X, which closes the replay from inside the game. Kept for the app's lifetime.
+fn arm_close_key(app: &AppHandle) {
+    let app_for_key = app.clone();
+    let pressed = move || {
+        log(&format!("{CLOSE_KEY} pressed - closing the replay"));
+        player::close(&app_for_key);
+    };
+    match win::Hotkey::register(CLOSE_KEY, pressed) {
+        Ok(k) => std::mem::forget(k),
+        Err(e) => log(&e),
+    }
+}
+
 fn open_settings(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("settings") {
         let _ = w.unminimize();
@@ -168,7 +181,7 @@ fn check_save_key(combo: &str) -> Result<(), String> {
     if win::parse_hotkey(combo)? == win::parse_hotkey(CLOSE_KEY)? {
         return Err(format!("{CLOSE_KEY} already closes the replay"));
     }
-    win::Hotkey::register(combo, || {}).map(drop)
+    win::hotkey_is_free(combo)
 }
 
 /// The "Change..." folder picker. Blocks while open, so it runs off the async runtime's threads.
@@ -268,12 +281,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         })
         .build(app)?;
 
-    // Ctrl+Shift+X closes the replay from inside the game. Kept for the app's lifetime.
-    let app_for_key = app.handle().clone();
-    match win::Hotkey::register(CLOSE_KEY, move || player::close(&app_for_key)) {
-        Ok(key) => std::mem::forget(key),
-        Err(e) => log(&e),
-    }
+    arm_close_key(app.handle());
 
     log(&format!("LoL Death Replay {} started", app.package_info().version));
     let update_handle = handle.clone();

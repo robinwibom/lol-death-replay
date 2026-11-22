@@ -9,8 +9,6 @@ use crate::{settings, win};
 const LABEL: &str = "player";
 
 pub fn show(app: &AppHandle, clip: &Path, title: &str, death_from_end: f64) {
-    close(app);
-    let s = settings::current(app);
     if let Err(e) = app.asset_protocol_scope().allow_file(clip) {
         crate::log(&format!("Couldn't allow the clip for playback: {e}"));
         return;
@@ -20,7 +18,30 @@ pub fn show(app: &AppHandle, clip: &Path, title: &str, death_from_end: f64) {
         .append_pair("clip", &clip.to_string_lossy())
         .append_pair("title", title)
         .append_pair("death", &death_from_end.to_string());
-    let page = format!("player.html?{}", url.query().unwrap_or_default());
+    let query = url.query().unwrap_or_default().to_string();
+
+    // Already open (died again while watching): load the new clip into it. Destroying it and
+    // building a new one fails, since the old one's label is only freed a moment later.
+    if let Some(window) = app.get_webview_window(LABEL) {
+        let reused = window.url().and_then(|mut url| {
+            url.set_path("/player.html");
+            url.set_query(Some(&query));
+            window.navigate(url)
+        });
+        match reused {
+            Ok(()) => {
+                let _ = window.set_title(title);
+                return;
+            }
+            Err(e) => {
+                crate::log(&format!("Couldn't load the clip into the open replay window: {e}"));
+                close(app);
+            }
+        }
+    }
+
+    let s = settings::current(app);
+    let page = format!("player.html?{query}");
 
     let built = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App(page.into()))
         .title(title)

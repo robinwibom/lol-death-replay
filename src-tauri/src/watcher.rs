@@ -205,12 +205,19 @@ pub fn arm_save_key(app: &AppHandle) {
     let mut key = state.save_key.lock().unwrap();
     *key = None; // released first, so registering the same combo again works
     let combo = settings::current(app).save_key;
-    if combo.is_empty() || state.recording.lock().unwrap().is_none() {
+    if state.recording.lock().unwrap().is_none() {
+        return;
+    }
+    if combo.is_empty() {
+        crate::log("Save hotkey is off (Settings > Clips)");
         return;
     }
     let app_for_key = app.clone();
     match win::Hotkey::register(&combo, move || save_now(&app_for_key)) {
-        Ok(k) => *key = Some(k),
+        Ok(k) => {
+            crate::log(&format!("Save hotkey {combo} ready"));
+            *key = Some(k);
+        }
         Err(e) => crate::log(&e),
     }
 }

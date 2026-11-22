@@ -1,7 +1,10 @@
 //! Small Windows helpers, each standing in for a dependency that did much more than this app needs.
 
 use std::ffi::c_void;
+use std::mem::size_of;
 use std::ptr::{null, null_mut};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, FILETIME, SYSTEMTIME, WIN32_ERROR};
@@ -9,13 +12,17 @@ use windows_sys::Win32::System::Registry::{
     RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_BINARY, RRF_RT_REG_SZ,
 };
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VK_F1,
+    RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VK_CONTROL, VK_F1,
+    VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
+};
+use windows_sys::Win32::UI::Input::{
+    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK,
+    RID_INPUT, RIM_TYPEKEYBOARD,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetMessageW, PeekMessageW, PostThreadMessageW, SetWindowDisplayAffinity, MSG, PM_NOREMOVE,
-    WDA_EXCLUDEFROMCAPTURE, WM_HOTKEY, WM_QUIT, WM_USER,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetMessageW, RegisterClassW,
+    SetWindowDisplayAffinity, MSG, RI_KEY_BREAK, RI_KEY_E0, WDA_EXCLUDEFROMCAPTURE, WM_INPUT, WNDCLASSW,
 };
 
 fn wide(s: &str) -> Vec<u16> {
@@ -73,48 +80,153 @@ pub fn set_autostart(name: &str, on: bool) -> Result<(), String> {
 
 // ---- Global hotkeys ----
 
-/// A global hotkey, registered until dropped.
+/// A global hotkey, active until dropped.
+///
+/// Keys are read with Raw Input in the background, not with `RegisterHotKey`: League tells Windows
+/// to skip registered hotkeys while the game is in front (they work everywhere else), but Raw Input
+/// still sees every key. Nothing is hooked or held back, so the key also reaches the app in front.
 pub struct Hotkey {
-    thread_id: u32,
-    thread: Option<std::thread::JoinHandle<()>>,
+    id: u64,
 }
 
+type Pressed = Arc<dyn Fn() + Send + Sync>;
+
+struct Binding {
+    id: u64,
+    mods: u32,
+    key: u32,
+    pressed: Pressed,
+}
+
+static BINDINGS: Mutex<Vec<Binding>> = Mutex::new(Vec::new());
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
 impl Hotkey {
-    /// Calls `pressed` whenever `combo` (e.g. "Ctrl+Shift+S", see `parse_hotkey`) is pressed, from any app.
-    /// The hotkey belongs to the thread that registers it, so it gets a thread of its own to wait on.
-    pub fn register(combo: &str, pressed: impl Fn() + Send + 'static) -> Result<Hotkey, String> {
+    /// Calls `pressed` whenever `combo` (e.g. "Ctrl+Shift+S", see `parse_hotkey`) is pressed, in any app.
+    pub fn register(combo: &str, pressed: impl Fn() + Send + Sync + 'static) -> Result<Hotkey, String> {
         let (mods, key) = parse_hotkey(combo)?;
-        let (tx, rx) = std::sync::mpsc::channel();
-        let thread = std::thread::spawn(move || unsafe {
-            if RegisterHotKey(null_mut(), 1, mods | MOD_NOREPEAT, key) == 0 {
-                let _ = tx.send(None);
-                return;
-            }
-            // Makes sure the thread has a message queue before anyone posts WM_QUIT to it.
-            let mut msg: MSG = std::mem::zeroed();
-            PeekMessageW(&mut msg, null_mut(), WM_USER, WM_USER, PM_NOREMOVE);
-            let _ = tx.send(Some(GetCurrentThreadId()));
-            while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
-                if msg.message == WM_HOTKEY {
-                    pressed();
-                }
-            }
-            UnregisterHotKey(null_mut(), 1);
-        });
-        match rx.recv() {
-            Ok(Some(thread_id)) => Ok(Hotkey { thread_id, thread: Some(thread) }),
-            _ => Err(format!("Couldn't use {combo} (another app may be using it)")),
+        start_listener()?;
+        let mut bindings = BINDINGS.lock().unwrap();
+        if bindings.iter().any(|b| b.mods == mods && b.key == key) {
+            return Err(format!("{combo} is already in use"));
         }
+        let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+        bindings.push(Binding { id, mods, key, pressed: Arc::new(pressed) });
+        Ok(Hotkey { id })
     }
 }
 
 impl Drop for Hotkey {
-    /// Unregisters it, and waits so the same combo can be registered again straight away.
     fn drop(&mut self) {
-        unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) };
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        BINDINGS.lock().unwrap().retain(|b| b.id != self.id);
+    }
+}
+
+/// Whether another app has `combo` as its hotkey. Then Windows hands the key to that app and we'd
+/// never see it, so it can't be ours either. Tries registering it for a moment.
+pub fn hotkey_is_free(combo: &str) -> Result<(), String> {
+    let (mods, key) = parse_hotkey(combo)?;
+    unsafe {
+        if RegisterHotKey(null_mut(), 0xB00, mods | MOD_NOREPEAT, key) == 0 {
+            return Err(format!("Couldn't use {combo} (another app may be using it)"));
         }
+        UnregisterHotKey(null_mut(), 0xB00);
+    }
+    Ok(())
+}
+
+/// Starts the one thread that reads the keyboard (a process gets one Raw Input target per device
+/// kind). Must run after Tauri's event loop exists, so ours is the keyboard target that stays.
+fn start_listener() -> Result<(), String> {
+    static STARTED: OnceLock<Result<(), String>> = OnceLock::new();
+    STARTED
+        .get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || listen(tx));
+            rx.recv().unwrap_or_else(|_| Err("The keyboard listener stopped".into()))
+        })
+        .clone()
+}
+
+fn listen(ready: std::sync::mpsc::Sender<Result<(), String>>) {
+    unsafe {
+        let class = wide("LoLDeathReplayKeys");
+        let wc = WNDCLASSW { lpfnWndProc: Some(DefWindowProcW), lpszClassName: class.as_ptr(), ..std::mem::zeroed() };
+        RegisterClassW(&wc);
+        // A hidden window to receive the input; it's never shown.
+        let hwnd = CreateWindowExW(0, class.as_ptr(), null(), 0, 0, 0, 0, 0, null_mut(), null_mut(), null_mut(), null());
+        let device = RAWINPUTDEVICE {
+            usUsagePage: 0x01, // generic desktop
+            usUsage: 0x06,     // keyboard
+            dwFlags: RIDEV_INPUTSINK, // also while another app is in front
+            hwndTarget: hwnd,
+        };
+        if hwnd.is_null() || RegisterRawInputDevices(&device, 1, size_of::<RAWINPUTDEVICE>() as u32) == 0 {
+            let _ = ready.send(Err("Couldn't start listening for hotkeys".into()));
+            return;
+        }
+        let _ = ready.send(Ok(()));
+        let mut down = [false; 256];
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            if msg.message == WM_INPUT {
+                if let Some((vk, pressed)) = read_key(msg.lParam) {
+                    on_key(&mut down, vk, pressed);
+                }
+            }
+            DispatchMessageW(&msg); // WM_INPUT needs DefWindowProc to clean up
+        }
+    }
+}
+
+/// The key code of a WM_INPUT keyboard event, and whether it went down.
+unsafe fn read_key(lparam: isize) -> Option<(usize, bool)> {
+    let mut input: RAWINPUT = std::mem::zeroed();
+    let mut size = size_of::<RAWINPUT>() as u32;
+    let header = size_of::<RAWINPUTHEADER>() as u32;
+    if GetRawInputData(lparam as HRAWINPUT, RID_INPUT, (&raw mut input).cast(), &mut size, header) == u32::MAX
+        || input.header.dwType != RIM_TYPEKEYBOARD
+    {
+        return None;
+    }
+    let kb = input.data.keyboard;
+    // 0xFF: part of an escape sequence. E0 + 2A/36: a "fake shift" Windows adds around some keys.
+    let fake_shift = kb.Flags as u32 & RI_KEY_E0 != 0 && (kb.MakeCode == 0x2A || kb.MakeCode == 0x36);
+    if kb.VKey == 0xFF || fake_shift {
+        return None;
+    }
+    Some((kb.VKey as usize, kb.Flags as u32 & RI_KEY_BREAK == 0))
+}
+
+/// Tracks which keys are down, and runs a binding when its key goes down with exactly its modifiers.
+fn on_key(down: &mut [bool; 256], vk: usize, pressed: bool) {
+    let repeat = pressed && down[vk];
+    down[vk] = pressed;
+    if !pressed || repeat {
+        return;
+    }
+    let held = |vks: &[u16]| vks.iter().any(|&k| down[k as usize]);
+    let mut mods = 0;
+    for (vks, m) in [
+        (&[VK_CONTROL, VK_LCONTROL, VK_RCONTROL][..], MOD_CONTROL),
+        (&[VK_MENU, VK_LMENU, VK_RMENU][..], MOD_ALT),
+        (&[VK_SHIFT, VK_LSHIFT, VK_RSHIFT][..], MOD_SHIFT),
+        (&[VK_LWIN, VK_RWIN][..], MOD_WIN),
+    ] {
+        if held(vks) {
+            mods |= m;
+        }
+    }
+    // Run outside the lock, so a binding may add or drop hotkeys.
+    let matching: Vec<Pressed> = BINDINGS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|b| b.key as usize == vk && b.mods == mods)
+        .map(|b| b.pressed.clone())
+        .collect();
+    for pressed in matching {
+        pressed();
     }
 }
 
@@ -207,5 +319,43 @@ mod tests {
         assert!(Hotkey::register(combo, || {}).is_err(), "already ours");
         drop(key);
         assert!(Hotkey::register(combo, || {}).is_ok(), "free again straight away");
+    }
+
+    /// Presses Ctrl+Alt+Shift+Win+`vk` with synthetic input, which global hotkeys react to.
+    fn press(vk: u16) {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+            SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL, VK_LWIN, VK_MENU,
+            VK_SHIFT,
+        };
+        let key = |vk: u16, up: bool| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: if up { KEYEVENTF_KEYUP } else { 0 }, time: 0, dwExtraInfo: 0 },
+            },
+        };
+        let mods = [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN];
+        let mut inputs: Vec<INPUT> = mods.iter().map(|&m| key(m, false)).collect();
+        inputs.push(key(vk, false));
+        inputs.push(key(vk, true));
+        inputs.extend(mods.iter().rev().map(|&m| key(m, true)));
+        unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+
+    #[test]
+    fn hotkeys_fire_and_dropping_one_leaves_the_other() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        let (a_hits, b_hits) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+        let (a2, b2) = (a_hits.clone(), b_hits.clone());
+        let a = Hotkey::register("Ctrl+Alt+Shift+Win+F23", move || { a2.fetch_add(1, Ordering::SeqCst); }).unwrap();
+        let b = Hotkey::register("Ctrl+Alt+Shift+Win+F22", move || { b2.fetch_add(1, Ordering::SeqCst); }).unwrap();
+        press(VK_F1 + 22); // F23
+        press(VK_F1 + 21); // F22
+        assert_eq!((a_hits.load(Ordering::SeqCst), b_hits.load(Ordering::SeqCst)), (1, 1), "both fire");
+        drop(a);
+        press(VK_F1 + 21);
+        assert_eq!(b_hits.load(Ordering::SeqCst), 2, "the other still fires after one is dropped");
+        drop(b);
     }
 }
