@@ -20,7 +20,7 @@ jobs:
   # A tag's run can only read caches saved by itself or by main, never by an earlier tag. So main
   # builds it whenever the script changes, and every release finds it there.
   ffmpeg:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04 # its MinGW-w64 (13) is the first with everything gfxcapture needs
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +29,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ffmpeg.exe
-          key: ffmpeg-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+          key: ffmpeg-ubuntu-26.04-${{ hashFiles('scripts/build-ffmpeg.sh') }} # the toolchain comes with the image
 
       - name: Build ffmpeg
         if: steps.cache.outputs.cache-hit != 'true'

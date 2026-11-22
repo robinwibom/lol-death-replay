@@ -56,7 +56,7 @@ While a match runs, ffmpeg keeps a rolling buffer of 1-second segments. On a dea
 
 Needs [Rust](https://rustup.rs), the Visual Studio C++ Build Tools, and the Tauri CLI (`cargo install tauri-cli --version "^2" --locked`).
 
-1. Put an `ffmpeg.exe` at `src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe`. Any recent Windows build works for development, e.g. from [BtbN](https://github.com/BtbN/FFmpeg-Builds/releases). Releases ship a much smaller one built by `scripts/build-ffmpeg.sh`, which cross-compiles from Linux or WSL and enables only what the app uses. If you use a new ffmpeg feature, enable it there and add it to `scripts/test-ffmpeg.ps1`, which checks an `ffmpeg.exe` has everything the app needs.
+1. Put an `ffmpeg.exe` at `src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe`. Any recent Windows build works for development, e.g. from [BtbN](https://github.com/BtbN/FFmpeg-Builds/releases). Releases ship a much smaller one built by `scripts/build-ffmpeg.sh`, which cross-compiles from Linux or WSL (MinGW-w64 13 or newer, e.g. Ubuntu 26.04) and enables only what the app uses. If you use a new ffmpeg feature, enable it there and add it to `scripts/test-ffmpeg.ps1`, which checks an `ffmpeg.exe` has everything the app needs.
 2. Run it: `cd src-tauri` then `cargo run`
 3. Build the installer: `cargo tauri build` (output in `src-tauri/target/release/bundle/nsis/`)
 

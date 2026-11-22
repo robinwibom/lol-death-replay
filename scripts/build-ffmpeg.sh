@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds a small ffmpeg.exe with only what the app uses (see src-tauri/src/recorder.rs).
-# Cross-compiles for Windows from Linux (Ubuntu: see the apt line in .github/workflows/release.yml).
+# Cross-compiles for Windows from Linux with MinGW-w64 13 or newer, which gfxcapture needs
+# (Ubuntu 26.04 or newer: see the apt line in .github/workflows/release.yml).
 #
 #   scripts/build-ffmpeg.sh [output path]     default: src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
 #
@@ -13,7 +14,6 @@ X264_COMMIT=b35605ace3ddf7c1a5d67a2eb553f034aef41d55 # stable branch
 NV_HEADERS_VERSION=n12.2.72.0 # SDK 12.2: works with NVIDIA drivers 550 and newer
 AMF_VERSION=v1.5.3
 LIBVPL_VERSION=v2.17.0
-MINGW_HEADERS_VERSION=v12.0.0 # just one header, for gfxcapture
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$ROOT/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe}"
@@ -21,6 +21,14 @@ WORK="${WORK:-$ROOT/target-ffmpeg}"
 PREFIX="$WORK/prefix"
 HOST=x86_64-w64-mingw32
 JOBS="$(nproc)"
+
+# Older MinGW headers lack parts of Windows Graphics Capture, and ffmpeg's configure then leaves
+# gfxcapture out without failing. Say so up front instead of after the whole build.
+MINGW_MAJOR="$(echo '#include <_mingw.h>' | $HOST-gcc -x c -dM -E - 2>/dev/null | awk '/define __MINGW64_VERSION_MAJOR/ {print $3}' || true)"
+if [ "${MINGW_MAJOR:-0}" -lt 13 ]; then
+    echo "Needs MinGW-w64 13 or newer (found ${MINGW_MAJOR:-none}); Ubuntu 26.04 has it" >&2
+    exit 1
+fi
 
 mkdir -p "$WORK" "$PREFIX"
 cd "$WORK"
@@ -67,14 +75,6 @@ if [ ! -f "$PREFIX/lib/libx264.a" ]; then
         make -j "$JOBS" >/dev/null && make install >/dev/null)
 fi
 
-# --- gfxcapture (Windows Graphics Capture) needs a header MinGW only ships from v12 on ---
-# Ubuntu 24.04 has v11. Without it, ffmpeg's configure quietly leaves gfxcapture out.
-if [ ! -f "$PREFIX/include/windows.graphics.capture.interop.h" ]; then
-    mkdir -p "$PREFIX/include"
-    curl -fsSL -o "$PREFIX/include/windows.graphics.capture.interop.h" \
-        "https://raw.githubusercontent.com/mingw-w64/mingw-w64/$MINGW_HEADERS_VERSION/mingw-w64-headers/include/windows.graphics.capture.interop.h"
-fi
-
 # --- ffmpeg: everything off, then only the pieces recorder.rs uses ---
 fetch https://github.com/FFmpeg/FFmpeg.git "$FFMPEG_VERSION" ffmpeg
 cd ffmpeg
@@ -104,10 +104,7 @@ cd ffmpeg
 # configure leaves out a filter whose requirements fail without saying so. Stop here with the
 # reason, instead of shipping an ffmpeg that can't record the game window.
 if ! grep -q "CONFIG_GFXCAPTURE_FILTER 1" config.h; then
-    echo "gfxcapture was left out. Its requirements as configure found them (config.h):" >&2
-    grep -iE "(HAVE|CONFIG)_(CXX17|THREADS|W32THREADS|D3D11VA|USER32|IGRAPHICSCAPTUREITEMINTEROP|__X_ABI_CWINDOWS_CGRAPHICS_CCAPTURE_CIGRAPHICSCAPTURESESSION3) " config.h >&2 || true
-    echo "--- and the checks behind them (ffbuild/config.log):" >&2
-    awk '/^(check_type .*GraphicsCapture|test_cxxflags_cc|check_cxxflags_cc|check_lib user32)/ {n = 30} n > 0 {print; n--}' ffbuild/config.log >&2
+    echo "gfxcapture was left out (see configure's warning above, and ffbuild/config.log)" >&2
     exit 1
 fi
 make -j "$JOBS" >/dev/null
