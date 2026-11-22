@@ -104,11 +104,10 @@ cd ffmpeg
 # configure leaves out a filter whose requirements fail without saying so. Stop here with the
 # reason, instead of shipping an ffmpeg that can't record the game window.
 if ! grep -q "CONFIG_GFXCAPTURE_FILTER 1" config.h; then
-    echo "gfxcapture was left out. What configure decided (ffbuild/config.log):" >&2
-    vars='cxx17|threads|w32threads|pthreads|atomics_native|stdatomic|atomics_win32|d3d11va|user32|IGraphicsCaptureItemInterop|__x_ABI_CWindows_CGraphics_CCapture_CIGraphicsCaptureSession3'
-    grep -E "^($vars)=" ffbuild/config.log >&2 || true
-    echo "--- the stdatomic and atomics_win32 checks:" >&2
-    awk '/^check_builtin (stdatomic|atomics_win32)/ {n = 25} n > 0 {print; n--}' ffbuild/config.log >&2
+    echo "gfxcapture was left out. Its requirements as configure found them (config.h):" >&2
+    grep -iE "(HAVE|CONFIG)_(CXX17|THREADS|W32THREADS|D3D11VA|USER32|IGRAPHICSCAPTUREITEMINTEROP|__X_ABI_CWINDOWS_CGRAPHICS_CCAPTURE_CIGRAPHICSCAPTURESESSION3) " config.h >&2 || true
+    echo "--- and the checks behind them (ffbuild/config.log):" >&2
+    awk '/^(check_type .*GraphicsCapture|test_cxxflags_cc|check_cxxflags_cc|check_lib user32)/ {n = 30} n > 0 {print; n--}' ffbuild/config.log >&2
     exit 1
 fi
 make -j "$JOBS" >/dev/null
