@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "LoL Death Replay",
+  "productName": "LoLDeathReplay",
   "version": "0.1.2",
   "identifier": "io.github.robinwibom.loldeathreplay",
   "build": {
@@ -33,7 +33,8 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "installerIcon": "icons/icon.ico"
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "windows/installer-hooks.nsh"
       }
     }
   }

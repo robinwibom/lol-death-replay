@@ -6,14 +6,14 @@ It runs quietly in the system tray. It starts recording when a match begins and 
 
 ## Install
 
-1. Download the installer (`LoL Death Replay_x.y.z_x64-setup.exe`) from the [latest release](../../releases/latest) and run it. Everything it needs, ffmpeg included, comes with it.
+1. Download the installer (`LoLDeathReplay_x.y.z_x64-setup.exe`) from the [latest release](../../releases/latest) and run it. Everything it needs, ffmpeg included, comes with it.
 2. In League, set **Settings → Video → Window Mode** to **Borderless**, so the replay can appear on top of the game.
 
 The installer isn't code-signed. Windows SmartScreen may warn about it (choose **More info → Run anyway**), and PCs with **Smart App Control** turned on will block it.
 
 ## Use
 
-Start **LoL Death Replay** from the Start menu (or turn on **Start with Windows** in its settings). A gold replay icon appears in the tray; click it for:
+Start **LoLDeathReplay** from the Start menu (or turn on **Start with Windows** in its settings). A gold replay icon appears in the tray; click it for:
 
 - **Replay last death**
 - **Open clips folder** (by default `Videos\LoLDeathReplay`)
