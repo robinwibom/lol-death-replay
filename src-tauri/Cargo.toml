@@ -1,6 +1,6 @@
 [package]
 name = "lol-death-replay"
-version = "0.2.0"
+version = "0.2.1"
 description = "Replays your League of Legends deaths in a small floating window"
 authors = ["Robin Wibom"]
 license = "GPL-3.0-or-later"
