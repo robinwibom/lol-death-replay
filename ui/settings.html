@@ -211,7 +211,8 @@
   }
   .toast.show { opacity: 1; transform: translate(-50%, 0) scale(1); transition-duration: 0.22s; }
   .toast.error { background: var(--danger); color: #fff; }
-  .toast .icon-error, .toast.error .icon-ok { display: none; }
+  .toast .icon-error, .toast.error .icon-ok, .toast.info .icon-ok { display: none; }
+  .toast.info { padding-left: 14px; } /* no icon, so even padding */
   .toast.error .icon-error { display: block; }
 
   @media (prefers-reduced-motion: reduce) {
@@ -309,13 +310,18 @@
 
   // ---- toast ----
   let toastTimer;
-  function toast(text, isError = false) {
+  // kind: 'ok' (a checkmark), 'info' (just text) or 'error'.
+  function toast(text, kind = 'ok') {
     $('toast-text').textContent = text;
-    $('toast').classList.toggle('error', isError);
+    $('toast').classList.toggle('error', kind === 'error');
+    $('toast').classList.toggle('info', kind === 'info');
     $('toast').classList.add('show');
     clearTimeout(toastTimer);
-    // Errors stay until the next successful save; confirmations fade on their own.
-    if (!isError) toastTimer = setTimeout(() => $('toast').classList.remove('show'), 1600);
+    // Errors stay until the next successful save; the rest fade on their own, info more slowly
+    // since there's a sentence to read.
+    if (kind !== 'error') {
+      toastTimer = setTimeout(() => $('toast').classList.remove('show'), kind === 'info' ? 3000 : 1600);
+    }
   }
 
   let saveTimer;
@@ -328,7 +334,7 @@
       await invoke('save_settings', { new: settings, startWithWindows: $('startWithWindows').checked });
       toast('Saved');
     } catch (e) {
-      toast(String(e), true);
+      toast(String(e), 'error');
       // Don't leave a switch showing a change that didn't happen.
       $('startWithWindows').checked = (await invoke('get_info')).startWithWindows;
     }
@@ -444,7 +450,7 @@
   $('startWithWindows').addEventListener('change', saveSoon);
   $('open').addEventListener('click', () => invoke('open_clips_folder'));
   $('log').addEventListener('click', () => invoke('open_log'));
-  $('test').addEventListener('click', () => invoke('preview_player'));
+  $('test').addEventListener('click', () => invoke('preview_player').catch((e) => toast(String(e), 'info')));
   $('change').addEventListener('click', async () => {
     const dir = await window.__TAURI__.dialog.open({ directory: true, defaultPath: settings.clipsDir });
     if (dir) {
