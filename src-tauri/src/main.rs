@@ -13,7 +13,7 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, Wry};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -23,6 +23,7 @@ use settings::{Settings, SettingsState};
 pub struct AppState {
     status: Mutex<String>,
     status_item: MenuItem<Wry>,
+    replay_item: MenuItem<Wry>,
     pub last_clip: Mutex<Option<PathBuf>>,
 }
 
@@ -69,18 +70,30 @@ fn open_path(path: &std::path::Path) {
 }
 
 /// The clip from this session's last death, or else the newest clip in the folder.
+/// Skips a clip that has since been deleted.
 fn last_clip(app: &AppHandle) -> Option<PathBuf> {
-    if let Some(clip) = app.state::<AppState>().last_clip.lock().unwrap().clone() {
+    let from_session = app.state::<AppState>().last_clip.lock().unwrap().clone();
+    if let Some(clip) = from_session.filter(|clip| clip.exists()) {
         return Some(clip);
     }
     watcher::clips(&settings::current(app).clips_dir).into_iter().max().map(|(_, _, path)| path)
 }
 
-fn replay_last(app: &AppHandle) {
-    match last_clip(app) {
-        Some(clip) => player::show(app, &clip, "Last death", settings::current(app).after),
-        None => log("No clips yet"),
-    }
+const NO_CLIPS: &str = "Nothing to replay yet"; // the settings toast fits one line
+
+fn replay_last(app: &AppHandle) -> Result<(), String> {
+    let clip = last_clip(app).ok_or(NO_CLIPS)?;
+    player::show(app, &clip, "Last death", settings::current(app).after);
+    Ok(())
+}
+
+/// Greys out "Replay last death" when there's nothing to replay. Called as the pointer reaches the
+/// tray icon, just before the menu can open, so it's never stale (clips saved or deleted since).
+fn refresh_replay_item(app: &AppHandle) {
+    let has_clip = last_clip(app).is_some();
+    let item = &app.state::<AppState>().replay_item;
+    let _ = item.set_enabled(has_clip);
+    let _ = item.set_text(if has_clip { "Replay last death" } else { "Replay last death (none yet)" });
 }
 
 // ---- commands used by ui/settings.html ----
@@ -135,9 +148,10 @@ fn ui_log(msg: String) {
     log(&msg);
 }
 
+/// The settings window shows the error as a toast.
 #[tauri::command]
-fn preview_player(app: AppHandle) {
-    replay_last(&app);
+fn preview_player(app: AppHandle) -> Result<(), String> {
+    replay_last(&app)
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -151,26 +165,39 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     // Tray icon and menu
     let status_item = MenuItem::with_id(app, "status", "Starting...", false, None::<&str>)?;
+    let replay_item = MenuItem::with_id(app, "replay", "Replay last death", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[
             &status_item,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "replay", "Replay last death", true, None::<&str>)?,
+            &replay_item,
             &MenuItem::with_id(app, "clips", "Open clips folder", true, None::<&str>)?,
             &MenuItem::with_id(app, "settings", "Settings...", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?,
         ],
     )?;
-    app.manage(AppState { status: Mutex::new(String::new()), status_item, last_clip: Mutex::new(None) });
+    app.manage(AppState {
+        status: Mutex::new(String::new()),
+        status_item,
+        replay_item,
+        last_clip: Mutex::new(None),
+    });
+    refresh_replay_item(app.handle());
     TrayIconBuilder::with_id("tray")
         .icon(app.default_window_icon().cloned().ok_or("no app icon")?)
         .tooltip("LoL Death Replay")
         .menu(&menu)
         .show_menu_on_left_click(true)
+        .on_tray_icon_event(|tray, event| {
+            if matches!(event, TrayIconEvent::Enter { .. } | TrayIconEvent::Click { .. }) {
+                refresh_replay_item(tray.app_handle());
+            }
+        })
         .on_menu_event(|app, event| match event.id().as_ref() {
-            "replay" => replay_last(app),
+            // Normally greyed out with no clips; this catches a clip deleted while the menu was open.
+            "replay" => replay_last(app).unwrap_or_else(|e| log(&e)),
             "clips" => open_clips_folder(app.clone()),
             "settings" => open_settings(app),
             "quit" => app.exit(0),
