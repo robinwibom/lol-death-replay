@@ -101,6 +101,16 @@ cd ffmpeg
     --enable-decoder=h264 --enable-parser=h264 --enable-bsf=extract_extradata,h264_mp4toannexb \
     `# reading an .mp4 back: the app doesn't (the WebView plays clips), test-ffmpeg.ps1 does` \
     --enable-demuxer=mov
+# configure leaves out a filter whose requirements fail without saying so. Stop here with the
+# reason, instead of shipping an ffmpeg that can't record the game window.
+if ! grep -q "CONFIG_GFXCAPTURE_FILTER 1" config.h; then
+    echo "gfxcapture was left out. Its checks in ffbuild/config.log:" >&2
+    for dep in cxx17 w32threads d3d11va IGraphicsCaptureItemInterop CIGraphicsCaptureSession3; do
+        echo "--- $dep" >&2
+        grep -n -A15 "$dep" ffbuild/config.log | grep -iE "error|$dep|check_" | head -12 >&2
+    done
+    exit 1
+fi
 make -j "$JOBS" >/dev/null
 $HOST-strip ffmpeg.exe
 
