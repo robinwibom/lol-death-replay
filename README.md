@@ -31,6 +31,10 @@ It stays on top of the game and never takes your keyboard away from it. Move the
 
 It closes by itself the next time you die (replaced by the new replay) and when the game ends.
 
+### Saving a moment
+
+Not every moment worth keeping is a death. During a game, press **Ctrl+Shift+S** to save the last 15 seconds (the same length as a death replay) as a clip like `12m40s_saved.mp4` in that game's folder. A small "Saved" note shows briefly at the top of the screen; no replay window opens. These clips are saved even with **Save clips** turned off. The hotkey can be changed or turned off in settings, and it's only taken from other apps while a game is being recorded.
+
 ### Settings
 
 Whether to show the replay and whether to save clips (turn both off and it doesn't record at all), how many seconds to keep before and after a death, recording quality (720p to native, 30 or 60 fps), the clips folder and its size limit (oldest clips are deleted first). Recording changes apply from the next game.

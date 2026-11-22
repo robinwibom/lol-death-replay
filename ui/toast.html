@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LoL Death Replay</title>
+<style>
+  /* A pill in a transparent window. It fades out just before the app closes the window at 1.5 s. */
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+  body {
+    display: grid;
+    place-items: center;
+    font: 600 14px/1 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    user-select: none;
+    cursor: default;
+  }
+  .pill {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 16px 9px 12px;
+    border-radius: 18px;
+    background: rgba(22, 22, 24, 0.92);
+    color: #f2f2f3;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+    white-space: nowrap;
+    animation: in 0.18s cubic-bezier(0.23, 1, 0.32, 1), out 0.2s ease-in 1.25s forwards;
+  }
+  .pill svg { color: #f5c542; flex: none; }
+  .pill.error svg { display: none; }
+  .pill.error { padding-left: 16px; }
+  @keyframes in { from { opacity: 0; transform: translateY(-6px) scale(0.96); } }
+  @keyframes out { to { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .pill { animation: out 0.2s ease-in 1.25s forwards; }
+  }
+</style>
+</head>
+<body>
+  <div class="pill" id="pill">
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.2l2.6 2.6L11 4.4"/></svg>
+    <span id="text">Saved</span>
+  </div>
+<script>
+  // ?text=... sets the message; anything but "Saved" is a failure and shows without the checkmark.
+  const text = new URLSearchParams(location.search).get('text');
+  if (text) document.getElementById('text').textContent = text;
+  document.getElementById('pill').classList.toggle('error', Boolean(text) && text !== 'Saved');
+</script>
+</body>
+</html>
