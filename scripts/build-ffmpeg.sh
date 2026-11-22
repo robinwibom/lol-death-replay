@@ -103,7 +103,7 @@ cd ffmpeg
     --enable-demuxer=mov
 # configure leaves out a filter whose requirements fail without saying so. Stop here with the
 # reason, instead of shipping an ffmpeg that can't record the game window.
-if ! grep -q "CONFIG_GFXCAPTURE_FILTER 1" config.h; then
+if ! grep -q "CONFIG_GFXCAPTURE_FILTER 1" config_components.h; then # filters are here, not config.h
     echo "gfxcapture was left out (see configure's warning above, and ffbuild/config.log)" >&2
     exit 1
 fi
