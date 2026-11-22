@@ -6,6 +6,7 @@ mod player;
 mod recorder;
 mod settings;
 mod watcher;
+mod win;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -15,8 +16,6 @@ use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, Wry};
-use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use settings::{Settings, SettingsState};
 
@@ -31,7 +30,11 @@ static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
 
 /// Writes a timestamped line to stderr and to the log file.
 pub fn log(msg: &str) {
-    let line = format!("[{}] {msg}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+    let t = win::local_time(std::time::SystemTime::now());
+    let line = format!(
+        "[{}-{:02}-{:02} {:02}:{:02}:{:02}] {msg}",
+        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+    );
     eprintln!("{line}");
     if let Some(path) = LOG_FILE.get() {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -63,8 +66,9 @@ fn open_settings(app: &AppHandle) {
     }
 }
 
+/// Opens a folder in Explorer, or a file in its default app.
 fn open_path(path: &std::path::Path) {
-    if let Err(e) = tauri_plugin_opener::open_path(path, None::<&str>) {
+    if let Err(e) = std::process::Command::new("explorer").arg(path).spawn() {
         log(&format!("Couldn't open {}: {e}", path.display()));
     }
 }
@@ -116,16 +120,22 @@ fn get_info(app: AppHandle) -> Info {
     Info {
         version: app.package_info().version.to_string(),
         status: app.state::<AppState>().status.lock().unwrap().clone(),
-        start_with_windows: app.autolaunch().is_enabled().unwrap_or(false),
+        start_with_windows: win::autostart_enabled(&app.package_info().name),
     }
 }
 
 #[tauri::command]
 fn save_settings(app: AppHandle, new: Settings, start_with_windows: bool) -> Result<(), String> {
     settings::update(&app, |s| *s = new);
-    let autostart = app.autolaunch();
-    let result = if start_with_windows { autostart.enable() } else { autostart.disable() };
-    result.map_err(|e| format!("Couldn't change start with Windows: {e}"))
+    win::set_autostart(&app.package_info().name, start_with_windows)
+        .map_err(|e| format!("Couldn't change start with Windows: {e}"))
+}
+
+/// The "Change..." folder picker. Blocks while open, so it runs off the async runtime's threads.
+#[tauri::command]
+async fn pick_folder(window: tauri::WebviewWindow, start: PathBuf) -> Option<PathBuf> {
+    let pick = move || rfd::FileDialog::new().set_directory(start).set_parent(&window).pick_folder();
+    tauri::async_runtime::spawn_blocking(pick).await.ok().flatten()
 }
 
 #[tauri::command]
@@ -148,9 +158,10 @@ fn ui_log(msg: String) {
     log(&msg);
 }
 
-/// The settings window shows the error as a toast.
+/// The settings window shows the error as a toast. Async because it opens a window: a sync command
+/// runs inside WebView2's message handler on Windows, and creating a webview from there deadlocks.
 #[tauri::command]
-fn preview_player(app: AppHandle) -> Result<(), String> {
+async fn preview_player(app: AppHandle) -> Result<(), String> {
     replay_last(&app)
 }
 
@@ -206,14 +217,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .build(app)?;
 
     // Ctrl+Shift+X closes the replay from inside the game.
-    let shortcut = app.global_shortcut().on_shortcut("ctrl+shift+x", |app, _, event| {
-        if event.state == ShortcutState::Pressed {
-            player::close(app);
-        }
-    });
-    if let Err(e) = shortcut {
-        log(&format!("Couldn't register Ctrl+Shift+X (another app may be using it): {e}"));
-    }
+    let app_for_key = app.handle().clone();
+    win::on_ctrl_shift('X', move || player::close(&app_for_key));
 
     log(&format!("LoL Death Replay {} started", app.package_info().version));
     std::thread::spawn(move || watcher::run(handle));
@@ -227,16 +232,13 @@ fn main() {
     tauri::Builder::default()
         // A second launch just opens settings in the running app.
         .plugin(tauri_plugin_single_instance::init(|app, _, _| open_settings(app)))
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_settings,
             get_info,
             save_settings,
             open_clips_folder,
             open_log,
+            pick_folder,
             preview_player,
             ui_log,
             player::player_close,

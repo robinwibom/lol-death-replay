@@ -7,20 +7,32 @@ license = "GPL-3.0-or-later"
 edition = "2021"
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = "2"
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
-tauri-plugin-autostart = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-global-shortcut = "2"
-tauri-plugin-opener = "2"
+# No default features: "compression" would build brotli to squeeze ~60 KB of UI, and the rest is Linux-only.
+tauri = { version = "2", default-features = false, features = ["wry", "common-controls-v6", "tray-icon", "protocol-asset"] }
 tauri-plugin-single-instance = "2"
-chrono = "0.4"
-ureq = { version = "3", default-features = false, features = ["json", "native-tls"] }
+rfd = { version = "0.17", default-features = false } # the clips folder picker
+ureq = { version = "3", default-features = false, features = ["json", "native-tls-no-default"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+# The same version Tauri uses, so it's only built once.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# Dependencies without debug info: faster dev builds and links. This crate keeps it.
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
 codegen-units = 1

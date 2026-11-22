@@ -1,12 +1,5 @@
-# Recorded deaths (personal, and large)
-clips/
-
 # Local launcher (contains absolute paths)
 *.lnk
-
-# Python
-__pycache__/
-*.pyc
 
 # Rust / Tauri build output
 target/

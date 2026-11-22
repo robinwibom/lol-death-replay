@@ -117,7 +117,7 @@
     background: var(--fg);
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
     transform: translate(-50%, -50%);
-    transition: width 0.15s var(--ease), height 0.15s var(--ease);
+    transition: width 0.15s var(--ease), height 0.15s var(--ease), background 0.2s ease;
   }
   .slider:hover .track, .slider.active .track { height: 6px; }
   .slider:hover .thumb, .slider.active .thumb { width: 14px; height: 14px; }
@@ -156,7 +156,6 @@
     text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
     pointer-events: none;
   }
-  .slider .thumb { transition: width 0.15s var(--ease), height 0.15s var(--ease), background 0.2s ease; }
   body.inzone #timeline .thumb { background: var(--gold); }
 
   .row {
@@ -240,7 +239,7 @@
 </style>
 </head>
 <body class="paused">
-  <video id="video" playsinline preload="auto"></video>
+  <video id="video" muted preload="auto"></video>
   <div id="surface"></div>
 
   <div class="shade top"></div>
@@ -303,17 +302,15 @@
   const params = new URLSearchParams(location.search);
   const SPEEDS = [0.25, 0.5, 0.75, 1, 1.5, 2];
   const SKIP = 5;
-  const FRAME = 1 / 30;
   // The death's exact frame isn't known, so the zone starts this many seconds before it.
   const ZONE_LEAD = 3;
   let aspect = 16 / 9;
   let zoneStart = 1;  // fraction of the clip where the death zone starts; 1 = no zone
 
-  // Rust side (src-tauri/src/player.rs). Opened in a plain browser for testing, calls do nothing.
-  const tauri = window.__TAURI__;
-  const call = (cmd, args) => (tauri ? tauri.core.invoke(cmd, args) : Promise.resolve());
+  // Rust side: src-tauri/src/player.rs
+  const { invoke: call, convertFileSrc } = window.__TAURI__.core;
   const close = () => call('player_close');
-  video.src = tauri ? tauri.core.convertFileSrc(params.get('clip')) : '/clip.mp4';
+  video.src = convertFileSrc(params.get('clip'));
   const uiLog = (msg) => call('ui_log', { msg: `Replay window: ${msg}` });
   video.addEventListener('error', () => uiLog(`can't play ${params.get('clip')} (${video.error?.message || video.error?.code})`));
   video.addEventListener('loadedmetadata', () => uiLog(`playing ${video.videoWidth}x${video.videoHeight}, ${video.duration.toFixed(1)}s`), { once: true });
@@ -334,12 +331,11 @@
   const seek = (t) => {
     if (video.duration) video.currentTime = clamp(t, 0, video.duration - 0.01);
   };
-  const step = (frames) => { video.pause(); seek(video.currentTime + frames * FRAME); };
 
   // Plays once and stops on the last frame; pressing play again starts over (the browser rewinds
   // an ended video by itself). Always starts at 1×; the speed menu changes it while watching.
-  // Autoplay with sound can be blocked; fall back to muted rather than not playing.
-  video.play().catch(() => { video.muted = true; video.play(); });
+  // Muted (clips have no sound anyway), so autoplay is always allowed.
+  video.play();
 
   video.addEventListener('play', () => body.classList.remove('paused'));
   video.addEventListener('pause', () => body.classList.add('paused'));
@@ -382,7 +378,7 @@
   $('surface').addEventListener('pointermove', (e) => {
     if (downAt && Math.hypot(e.screenX - downAt[0], e.screenY - downAt[1]) >= 4) {
       downAt = null;
-      tauri?.window.getCurrentWindow().startDragging();
+      window.__TAURI__.window.getCurrentWindow().startDragging();
     }
   });
   $('surface').addEventListener('pointerup', () => {
@@ -497,18 +493,6 @@
     });
   }
 
-  // ---- keys: only when the window has keyboard focus, which it normally never takes from the game ----
-  document.addEventListener('keydown', (e) => {
-    const keys = {
-      ' ': togglePlay,
-      ArrowLeft: () => seek(video.currentTime - SKIP),
-      ArrowRight: () => seek(video.currentTime + SKIP),
-      ',': () => step(-1),
-      '.': () => step(1),
-      Escape: close,
-    };
-    if (keys[e.key]) { e.preventDefault(); keys[e.key](); }
-  });
   document.addEventListener('contextmenu', (e) => e.preventDefault());
 </script>
 </body>

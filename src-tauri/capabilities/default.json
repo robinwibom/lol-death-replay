@@ -5,7 +5,6 @@
   "windows": ["player", "settings"],
   "permissions": [
     "core:default",
-    "core:window:allow-start-dragging",
-    "dialog:allow-open"
+    "core:window:allow-start-dragging"
   ]
 }

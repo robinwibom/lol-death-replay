@@ -1,6 +1,6 @@
 # LoL Death Replay
 
-When you die in League of Legends, a small replay window pops up over the game and loops the 15 seconds leading up to your death, so you can see what went wrong while you wait to respawn. Every death is also saved as a clip, named with the game time and who killed you.
+When you die in League of Legends, a small replay window pops up over the game and plays the 15 seconds leading up to your death, so you can see what went wrong while you wait to respawn. Every death is also saved as a clip, named with the game time and who killed you.
 
 It runs quietly in the system tray. It starts recording when a match begins and stops when it ends.
 
@@ -37,7 +37,7 @@ Whether to show the replay and whether to save clips (turn both off and it doesn
 
 ## Troubleshooting
 
-- **Replays are black**: set **Capture method** to **Compatible**, and check the game is in Borderless mode.
+- **Replays are black**: check the game is in Borderless mode. If they still are, close the app, set `"capture": "gdigrab"` in `%APPDATA%\io.github.robinwibom.loldeathreplay\settings.json` and start it again. (The app already switches to that by itself when fast capture fails outright.)
 - **The game stutters**: lower **Quality** to 720p. The app uses your graphics card's video encoder (NVIDIA, AMD or Intel); the log says which one.
 - **Replay doesn't appear over the game**: use Borderless mode; true fullscreen hides other windows.
 - Anything else: **Settings → Open log**.
@@ -60,7 +60,7 @@ Releases are built by GitHub Actions: push a tag like `v0.1.0` and `.github/work
 
 Layout:
 
-- `src-tauri/src/`: the Rust app. `watcher.rs` is the main loop, `recorder.rs` drives ffmpeg, `live_client.rs` talks to the game, `player.rs` opens the replay window, `settings.rs` stores settings.
+- `src-tauri/src/`: the Rust app. `watcher.rs` is the main loop, `recorder.rs` drives ffmpeg, `live_client.rs` talks to the game, `player.rs` opens the replay window, `settings.rs` stores settings, `win.rs` holds small Windows helpers (start with Windows, the hotkey, local time).
 - `ui/`: `player.html` (replay window) and `settings.html`.
 
 ## License

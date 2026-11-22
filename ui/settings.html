@@ -360,8 +360,7 @@
       button.setAttribute('role', 'radio');
       button.dataset.label = button.textContent; // feeds the width-reserving ::after
       button.addEventListener('click', (e) => {
-        const raw = button.dataset.value;
-        settings[seg.dataset.key] = Number(raw);
+        settings[seg.dataset.key] = Number(button.dataset.value);
         selectSeg(seg, e.detail === 0); // keyboard (Enter/Space) clicks have detail 0: no animation
         saveSoon();
       });
@@ -369,15 +368,12 @@
   }
 
   // ---- steppers ----
-  /**
-   * Turns what the user typed into the value to show. Called when a stepper's field loses focus
-   * or Enter is pressed. `input.value` is a string ('' when the field is empty or not a number);
-   * input.min / input.max / input.step are strings from the HTML; `previous` is the number the
-   * field showed before this edit. Returns the number to show (and save).
-   */
+  // What the user typed, rounded to the step and kept in range. Empty or not a number: unchanged.
   function normalize(input, previous) {
-    // TODO(human): decide what happens to out-of-range or invalid input
-    return Number(input.value);
+    if (input.value.trim() === '' || !Number.isFinite(Number(input.value))) return previous;
+    const step = Number(input.step);
+    const rounded = Math.round(Number(input.value) / step) * step;
+    return Math.min(Number(input.max), Math.max(Number(input.min), rounded));
   }
 
   const stepperButtons = (input) => input.closest('.stepper').querySelectorAll('button');
@@ -452,7 +448,7 @@
   $('log').addEventListener('click', () => invoke('open_log'));
   $('test').addEventListener('click', () => invoke('preview_player').catch((e) => toast(String(e), 'info')));
   $('change').addEventListener('click', async () => {
-    const dir = await window.__TAURI__.dialog.open({ directory: true, defaultPath: settings.clipsDir });
+    const dir = await invoke('pick_folder', { start: settings.clipsDir });
     if (dir) {
       settings.clipsDir = dir;
       fill();

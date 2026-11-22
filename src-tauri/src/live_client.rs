@@ -74,7 +74,6 @@ pub fn is_dead(players: &Value, names: &HashSet<String>) -> bool {
 }
 
 /// Something with a name to show ("Miss Fortune") and one for file names ("MissFortune").
-#[derive(Clone, Debug, PartialEq)]
 pub struct Named {
     pub display: String,
     pub file: String,
@@ -124,7 +123,7 @@ const KILLER_NAMES: [(&str, &str); 7] = [
     ("SRU_Dragon", "Dragon"),
 ];
 
-pub fn pretty_killer(name: &str) -> String {
+fn pretty_killer(name: &str) -> String {
     if let Some((_, pretty)) = KILLER_NAMES.iter().find(|(key, _)| name.contains(key)) {
         return pretty.to_string();
     }

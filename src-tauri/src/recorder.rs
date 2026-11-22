@@ -100,10 +100,7 @@ fn encoder_works(ffmpeg_exe: &Path, encoder: &str) -> bool {
 }
 
 /// The first GPU encoder that works on this PC, falling back to the CPU (libx264).
-pub fn pick_encoder(ffmpeg_exe: &Path, wanted: &str) -> String {
-    if wanted != "auto" {
-        return wanted.to_string();
-    }
+pub fn pick_encoder(ffmpeg_exe: &Path) -> String {
     HW_ENCODERS
         .into_iter()
         .find(|enc| encoder_works(ffmpeg_exe, enc))
@@ -172,7 +169,7 @@ impl Recorder {
         }
     }
 
-    pub fn stop(&self) {
+    fn stop(&self) {
         if let Some(mut child) = self.child.lock().unwrap().take() {
             // "q" lets ffmpeg finish the current segment cleanly.
             if let Some(stdin) = child.stdin.as_mut() {
@@ -224,7 +221,7 @@ impl Recorder {
             .current_dir(&self.dir)
             .output()
             .map_err(|e| e.to_string())?;
-        if result.status.success() && out.exists() {
+        if result.status.success() {
             Ok(())
         } else {
             let err = String::from_utf8_lossy(&result.stderr);
