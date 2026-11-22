@@ -112,15 +112,32 @@ pub fn find_killer(events: Option<&Value>, players: Option<&Value>, names: &Hash
     Named { file: pretty.replace(' ', ""), display: pretty }
 }
 
-/// Internal names the API uses for non-champion killers, e.g. "Turret_TChaos_L1_P2_2237424422".
-const KILLER_NAMES: [(&str, &str); 7] = [
+/// Internal names the API uses for non-champion killers, e.g. "Turret_TChaos_L1_P2_2237424422" or
+/// "SRU_Dragon_Water6.1.1" (unit name, then camp number and which monster in the camp).
+/// The first key the name contains wins, so specific keys must come before general ones.
+/// Small camp monsters ("SRU_BlueMini", "SRU_KrugMini") count as their camp.
+const KILLER_NAMES: &[(&str, &str)] = &[
     ("Turret", "Turret"),
     ("Minion", "Minion"),
-    ("SRU_Baron", "Baron"),
-    ("SRU_RiftHerald", "Rift Herald"),
-    ("SRU_Horde", "Voidgrubs"),
+    ("SRU_Dragon_Air", "Cloud Drake"),
+    ("SRU_Dragon_Fire", "Infernal Drake"),
+    ("SRU_Dragon_Earth", "Mountain Drake"),
+    ("SRU_Dragon_Water", "Ocean Drake"),
+    ("SRU_Dragon_Hextech", "Hextech Drake"),
+    ("SRU_Dragon_Chemtech", "Chemtech Drake"),
     ("SRU_Dragon_Elder", "Elder Dragon"),
     ("SRU_Dragon", "Dragon"),
+    ("SRU_Baron", "Baron"),
+    ("SRU_RiftHerald", "Rift Herald"),
+    ("SRU_Horde", "Voidgrub"),
+    ("SRU_Atakhan", "Atakhan"),
+    ("SRU_Blue", "Blue Buff"),
+    ("SRU_Red", "Red Buff"),
+    ("SRU_Gromp", "Gromp"),
+    ("SRU_Murkwolf", "Murk Wolf"),
+    ("SRU_Razorbeak", "Raptor"),
+    ("SRU_Krug", "Krug"),
+    ("SRU_Crab", "Scuttle Crab"),
 ];
 
 fn pretty_killer(name: &str) -> String {
@@ -143,8 +160,17 @@ mod tests {
         assert_eq!(pretty_killer("Turret_TChaos_L1_P2_2237424422_0"), "Turret");
         assert_eq!(pretty_killer("Minion_T200L1S04N0010"), "Minion");
         assert_eq!(pretty_killer("SRU_Baron12.1.1"), "Baron");
-        assert_eq!(pretty_killer("SRU_Dragon_Air6.1.1"), "Dragon");
+        assert_eq!(pretty_killer("SRU_Dragon_Air6.1.1"), "Cloud Drake");
+        assert_eq!(pretty_killer("SRU_Dragon_Water6.1.1"), "Ocean Drake");
+        assert_eq!(pretty_killer("SRU_Dragon_Elder6.1.1"), "Elder Dragon");
+        assert_eq!(pretty_killer("SRU_Dragon_Ruined6.1.1"), "Dragon");
+        assert_eq!(pretty_killer("SRU_Horde_Mini18.1.1"), "Voidgrub");
+        assert_eq!(pretty_killer("SRU_BlueMini1.1.2"), "Blue Buff");
+        assert_eq!(pretty_killer("SRU_Red4.1.1"), "Red Buff");
+        assert_eq!(pretty_killer("SRU_KrugMiniMini5.1.3"), "Krug");
+        assert_eq!(pretty_killer("SRU_Crab15.1.1"), "Scuttle Crab");
         assert_eq!(pretty_killer("SRU_Gromp13.1.1"), "Gromp");
+        assert_eq!(pretty_killer("SRU_Duck20.1.1"), "Duck"); // unknown monsters fall back to cleanup
         assert_eq!(pretty_killer("Faker#KR1"), "Faker");
     }
 
