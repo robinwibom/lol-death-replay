@@ -1,10 +1,14 @@
 # Builds the Windows installer and publishes it as a GitHub release.
 # Run it by pushing a version tag, e.g.:  git tag v0.1.0 && git push origin v0.1.0
+# The tests run on every push to main instead (ci.yml), so tag a commit whose tests passed.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+    # Only builds ffmpeg (see below). Path filters don't apply to tags: every tag releases.
+    branches: [main]
+    paths: [scripts/build-ffmpeg.sh, .github/workflows/release.yml]
   workflow_dispatch:
 
 permissions:
@@ -13,6 +17,8 @@ permissions:
 jobs:
   # ffmpeg does the recording. It's bundled next to the app (GPL build, so the app is GPL too).
   # This builds a small one with only what the app uses; it's cached until the script changes.
+  # A tag's run can only read caches saved by itself or by main, never by an earlier tag. So main
+  # builds it whenever the script changes, and every release finds it there.
   ffmpeg:
     runs-on: ubuntu-24.04
     steps:
@@ -39,13 +45,14 @@ jobs:
 
   build:
     needs: ffmpeg
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # No build cache: releases are rare, a cold build takes ~6 minutes, and saving the cache hung for an hour.
+      # No build cache: releases are rare, a cold build takes ~4 minutes, and saving the cache hung for an hour.
 
       - name: Install Tauri CLI
         uses: taiki-e/install-action@v2
@@ -63,10 +70,6 @@ jobs:
           New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
           Copy-Item "$env:RUNNER_TEMP/ffmpeg/ffmpeg.exe" src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
           scripts/test-ffmpeg.ps1
-
-      - name: Test
-        working-directory: src-tauri
-        run: cargo test
 
       - name: Build installer
         working-directory: src-tauri

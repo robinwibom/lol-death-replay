@@ -1,0 +1,27 @@
+# Runs the Rust tests on every push to main. Releases (release.yml) don't run them again.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "LICENSE"]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Tauri's build script checks the bundled ffmpeg exists; the tests never run it.
+      - name: Stand-in ffmpeg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
+          New-Item -ItemType File -Force src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe | Out-Null
+
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test
