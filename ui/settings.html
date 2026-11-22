@@ -185,6 +185,10 @@
   .switch input:checked:active + span::after { transform: translateX(16px) scaleX(1.2); }
   .switch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+  /* ---- hotkey field: click, then press the combo ---- */
+  .btn.key { min-width: 104px; justify-content: center; font-variant-numeric: tabular-nums; }
+  .btn.key.capturing { box-shadow: inset 0 0 0 1.5px var(--accent); color: var(--muted); }
+
   footer { display: flex; justify-content: space-between; align-items: center; margin-top: 20px; padding: 0 4px; color: var(--muted); font-size: 12px; }
 
   /* ---- toast: always in view, enters a little slower than it leaves ---- */
@@ -281,6 +285,10 @@
       <label class="label" for="maxFolderGb">Folder size limit</label>
       <div class="stepper"><button data-step="-1" aria-label="Smaller limit"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6h7"/></svg></button><span class="value"><input type="number" id="maxFolderGb" min="1" max="1000" step="1"><span class="unit">GB</span></span><button data-step="1" aria-label="Larger limit"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6h7M6 2.5v7"/></svg></button></div>
     </div>
+    <div class="row">
+      <span class="label" id="saveKeyLabel">Save hotkey<span class="path" id="saveKeyHint"></span></span>
+      <button class="btn key" id="saveKey" aria-labelledby="saveKeyLabel"></button>
+    </div>
   </div>
 
   <h2>General</h2>
@@ -335,8 +343,10 @@
       toast('Saved');
     } catch (e) {
       toast(String(e), 'error');
-      // Don't leave a switch showing a change that didn't happen.
+      // Don't leave a switch or the hotkey showing a change that didn't happen.
       $('startWithWindows').checked = (await invoke('get_info')).startWithWindows;
+      settings.saveKey = (await invoke('get_settings')).saveKey;
+      showKey();
     }
   }
 
@@ -383,6 +393,7 @@
     const [less, more] = stepperButtons(input);
     less.disabled = settings[input.id] <= Number(input.min);
     more.disabled = settings[input.id] >= Number(input.max);
+    if (input.id === 'before') showKey(); // its hint says how many seconds
   }
   for (const id of STEPPERS) {
     const input = $(id);
@@ -415,7 +426,41 @@
     }
   }
 
+  // ---- save hotkey ----
+  let capturing = false;
+  function showKey() {
+    $('saveKey').textContent = capturing ? 'Press keys...' : settings.saveKey || 'Off';
+    $('saveKey').classList.toggle('capturing', capturing);
+    // Esc cancels too, but that goes without saying (and the hint has little room).
+    $('saveKeyHint').textContent = capturing ? 'Backspace turns it off' : `Saves the last ${settings.before} seconds`;
+  }
+  function stopCapture() {
+    capturing = false;
+    showKey();
+  }
+  $('saveKey').addEventListener('click', () => { capturing = !capturing; showKey(); });
+  $('saveKey').addEventListener('blur', stopCapture);
+  $('saveKey').addEventListener('keydown', (e) => {
+    if (!capturing) return;
+    e.preventDefault();
+    if (e.key === 'Escape') return stopCapture();
+    if (e.key === 'Backspace' || e.key === 'Delete') {
+      settings.saveKey = '';
+      stopCapture();
+      return save();
+    }
+    // The key itself by position (e.code), so Shift doesn't turn "1" into "!": a letter, a digit or F1-F24.
+    const key = e.code.match(/^Key([A-Z])$|^Digit(\d)$|^(F(?:[1-9]|1\d|2[0-4]))$/)?.slice(1).find(Boolean);
+    if (!key) return; // a modifier on its own so far, or a key that can't be used: keep listening
+    const mods = [e.ctrlKey && 'Ctrl', e.altKey && 'Alt', e.shiftKey && 'Shift', e.metaKey && 'Win'].filter(Boolean);
+    if (!mods.length) return toast('Hold Ctrl, Alt or Shift with the key', 'info');
+    settings.saveKey = [...mods, key].join('+');
+    stopCapture();
+    save();
+  });
+
   function fill() {
+    showKey();
     for (const id of STEPPERS) syncStepper($(id));
     for (const seg of document.querySelectorAll('.seg')) selectSeg(seg, true);
     $('autoPlay').checked = settings.autoPlay;

@@ -5,12 +5,13 @@ mod live_client;
 mod player;
 mod recorder;
 mod settings;
+mod toast;
 mod watcher;
 mod win;
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -24,7 +25,14 @@ pub struct AppState {
     status_item: MenuItem<Wry>,
     replay_item: MenuItem<Wry>,
     pub last_clip: Mutex<Option<PathBuf>>,
+    /// While a game records: its recorder and clip folder name, for the save hotkey.
+    pub recording: Mutex<Option<(Arc<recorder::Recorder>, String)>>,
+    /// The save hotkey, registered only while a game records.
+    pub save_key: Mutex<Option<win::Hotkey>>,
 }
+
+/// Closes the replay from inside the game. Always registered.
+const CLOSE_KEY: &str = "Ctrl+Shift+X";
 
 static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
 
@@ -125,10 +133,33 @@ fn get_info(app: AppHandle) -> Info {
 }
 
 #[tauri::command]
-fn save_settings(app: AppHandle, new: Settings, start_with_windows: bool) -> Result<(), String> {
+fn save_settings(app: AppHandle, mut new: Settings, start_with_windows: bool) -> Result<(), String> {
+    // A save hotkey that can't be used keeps the old one; the rest of the settings still save.
+    let old_key = settings::current(&app).save_key;
+    let key_error = (new.save_key != old_key).then(|| check_save_key(&new.save_key).err()).flatten();
+    if key_error.is_some() {
+        new.save_key = old_key.clone();
+    }
+    let key_changed = new.save_key != old_key;
     settings::update(&app, |s| *s = new);
+    if key_changed {
+        watcher::arm_save_key(&app); // takes effect now if a game is recording
+    }
     win::set_autostart(&app.package_info().name, start_with_windows)
-        .map_err(|e| format!("Couldn't change start with Windows: {e}"))
+        .map_err(|e| format!("Couldn't change start with Windows: {e}"))?;
+    key_error.map_or(Ok(()), Err)
+}
+
+/// Whether `combo` would work as the save hotkey: a valid combo that no other app (or our own close
+/// key) has. Tries registering it for a moment, since outside a game it isn't registered.
+fn check_save_key(combo: &str) -> Result<(), String> {
+    if combo.is_empty() {
+        return Ok(()); // turned off
+    }
+    if win::parse_hotkey(combo)? == win::parse_hotkey(CLOSE_KEY)? {
+        return Err(format!("{CLOSE_KEY} already closes the replay"));
+    }
+    win::Hotkey::register(combo, || {}).map(drop)
 }
 
 /// The "Change..." folder picker. Blocks while open, so it runs off the async runtime's threads.
@@ -194,6 +225,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         status_item,
         replay_item,
         last_clip: Mutex::new(None),
+        recording: Mutex::new(None),
+        save_key: Mutex::new(None),
     });
     refresh_replay_item(app.handle());
     TrayIconBuilder::with_id("tray")
@@ -216,9 +249,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         })
         .build(app)?;
 
-    // Ctrl+Shift+X closes the replay from inside the game.
+    // Ctrl+Shift+X closes the replay from inside the game. Kept for the app's lifetime.
     let app_for_key = app.handle().clone();
-    win::on_ctrl_shift('X', move || player::close(&app_for_key));
+    match win::Hotkey::register(CLOSE_KEY, move || player::close(&app_for_key)) {
+        Ok(key) => std::mem::forget(key),
+        Err(e) => log(&e),
+    }
 
     log(&format!("LoL Death Replay {} started", app.package_info().version));
     std::thread::spawn(move || watcher::run(handle));

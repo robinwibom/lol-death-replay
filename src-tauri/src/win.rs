@@ -8,8 +8,13 @@ use windows_sys::Win32::System::Registry::{
     RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_BINARY, RRF_RT_REG_SZ,
 };
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT};
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VK_F1,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetMessageW, PeekMessageW, PostThreadMessageW, MSG, PM_NOREMOVE, WM_HOTKEY, WM_QUIT, WM_USER,
+};
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
@@ -64,23 +69,85 @@ pub fn set_autostart(name: &str, on: bool) -> Result<(), String> {
     })
 }
 
-// ---- Global hotkey ----
+// ---- Global hotkeys ----
 
-/// Calls `pressed` whenever Ctrl+Shift+`key` is pressed, from any app. `key` is an uppercase letter.
-/// The hotkey belongs to the thread that registers it, so it gets a thread of its own to wait on.
-pub fn on_ctrl_shift(key: char, pressed: impl Fn() + Send + 'static) {
-    std::thread::spawn(move || unsafe {
-        if RegisterHotKey(null_mut(), 1, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, key as u32) == 0 {
-            crate::log(&format!("Couldn't register Ctrl+Shift+{key} (another app may be using it)"));
-            return;
-        }
-        let mut msg: MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
-            if msg.message == WM_HOTKEY {
-                pressed();
+/// A global hotkey, registered until dropped.
+pub struct Hotkey {
+    thread_id: u32,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Hotkey {
+    /// Calls `pressed` whenever `combo` (e.g. "Ctrl+Shift+S", see `parse_hotkey`) is pressed, from any app.
+    /// The hotkey belongs to the thread that registers it, so it gets a thread of its own to wait on.
+    pub fn register(combo: &str, pressed: impl Fn() + Send + 'static) -> Result<Hotkey, String> {
+        let (mods, key) = parse_hotkey(combo)?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || unsafe {
+            if RegisterHotKey(null_mut(), 1, mods | MOD_NOREPEAT, key) == 0 {
+                let _ = tx.send(None);
+                return;
             }
+            // Makes sure the thread has a message queue before anyone posts WM_QUIT to it.
+            let mut msg: MSG = std::mem::zeroed();
+            PeekMessageW(&mut msg, null_mut(), WM_USER, WM_USER, PM_NOREMOVE);
+            let _ = tx.send(Some(GetCurrentThreadId()));
+            while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+                if msg.message == WM_HOTKEY {
+                    pressed();
+                }
+            }
+            UnregisterHotKey(null_mut(), 1);
+        });
+        match rx.recv() {
+            Ok(Some(thread_id)) => Ok(Hotkey { thread_id, thread: Some(thread) }),
+            _ => Err(format!("Couldn't use {combo} (another app may be using it)")),
         }
-    });
+    }
+}
+
+impl Drop for Hotkey {
+    /// Unregisters it, and waits so the same combo can be registered again straight away.
+    fn drop(&mut self) {
+        unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) };
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Reads a combo like "Ctrl+Shift+S" into RegisterHotKey's modifiers and key code. Takes Ctrl, Alt,
+/// Shift and Win (at least one, so a bare key doesn't stop working in the game), then one key:
+/// a letter, a digit or F1 to F24. Case and spaces don't matter.
+pub fn parse_hotkey(combo: &str) -> Result<(u32, u32), String> {
+    let invalid = || format!("\"{combo}\" isn't a hotkey");
+    let mut parts: Vec<String> = combo.split('+').map(|p| p.trim().to_ascii_uppercase()).collect();
+    let key = parts.pop().ok_or_else(invalid)?;
+    let mut mods = 0;
+    for part in parts {
+        let m = match part.as_str() {
+            "CTRL" | "CONTROL" => MOD_CONTROL,
+            "ALT" => MOD_ALT,
+            "SHIFT" => MOD_SHIFT,
+            "WIN" => MOD_WIN,
+            _ => return Err(invalid()),
+        };
+        if mods & m != 0 {
+            return Err(invalid());
+        }
+        mods |= m;
+    }
+    if mods == 0 {
+        return Err(format!("A hotkey needs Ctrl, Alt, Shift or Win, not just {key}"));
+    }
+    let code = match key.as_bytes() {
+        [c] if c.is_ascii_alphanumeric() => *c as u32, // A-Z and 0-9 are their own key codes
+        _ => match key.strip_prefix('F').map(|n| (n, n.parse::<u32>())) {
+            Some((n, Ok(f @ 1..=24))) if n == f.to_string() => VK_F1 as u32 + f - 1,
+            _ => return Err(invalid()),
+        },
+    };
+    Ok((mods, code))
 }
 
 // ---- Local time ----
@@ -96,5 +163,30 @@ pub fn local_time(t: SystemTime) -> SYSTEMTIME {
         FileTimeToSystemTime(&file, &mut utc);
         SystemTimeToTzSpecificLocalTime(null(), &utc, &mut local);
         local
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_hotkeys() {
+        assert_eq!(parse_hotkey("Ctrl+Shift+S"), Ok((MOD_CONTROL | MOD_SHIFT, 'S' as u32)));
+        assert_eq!(parse_hotkey(" alt + 5 "), Ok((MOD_ALT, '5' as u32)));
+        assert_eq!(parse_hotkey("Win+Ctrl+F12"), Ok((MOD_WIN | MOD_CONTROL, VK_F1 as u32 + 11)));
+        let bad = ["", "S", "F5", "Ctrl+", "Ctrl+Ctrl+S", "Ctrl+Meta+S", "Ctrl+F0", "Ctrl+F25", "Ctrl+F05", "Ctrl+Space"];
+        for bad in bad {
+            assert!(parse_hotkey(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn hotkeys_are_released_when_dropped() {
+        let combo = "Ctrl+Alt+Shift+Win+F24"; // unlikely to belong to anything else
+        let key = Hotkey::register(combo, || {}).unwrap();
+        assert!(Hotkey::register(combo, || {}).is_err(), "already ours");
+        drop(key);
+        assert!(Hotkey::register(combo, || {}).is_ok(), "free again straight away");
     }
 }
