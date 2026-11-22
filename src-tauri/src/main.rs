@@ -61,8 +61,13 @@ fn open_settings(app: &AppHandle) {
         .min_inner_size(400.0, 480.0)
         .center()
         .build();
-    if let Err(e) = built {
-        log(&format!("Couldn't open settings: {e}"));
+    match built {
+        Ok(window) => {
+            if let Ok(hwnd) = window.hwnd() {
+                win::exclude_from_capture(hwnd.0); // kept out of clips, like the replay window
+            }
+        }
+        Err(e) => log(&format!("Couldn't open settings: {e}")),
     }
 }
 

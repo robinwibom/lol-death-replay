@@ -3,7 +3,7 @@
 #
 #   scripts/test-ffmpeg.ps1 [path to ffmpeg.exe]
 #
-# Screen capture itself (ddagrab, gdigrab) can't run on a CI machine, so it only checks they exist.
+# Screen capture itself (gfxcapture, ddagrab, gdigrab) can't run on a CI machine, so it only checks they exist.
 param([string]$Ffmpeg = "$PSScriptRoot/../src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe")
 $ErrorActionPreference = 'Stop'
 $Ffmpeg = (Resolve-Path $Ffmpeg).Path # absolute: the pipeline below runs in a temp folder
@@ -14,7 +14,7 @@ function Fail([string]$msg) { Write-Host "FAIL: $msg"; exit 1 }
 $needed = @{
     encoder = 'h264_nvenc', 'h264_amf', 'h264_qsv', 'libx264'
     decoder = 'wrapped_avframe', 'bmp', 'h264' # lavfi and gdigrab frames; reading segments back
-    filter  = 'ddagrab', 'hwdownload', 'format', 'scale', 'color'
+    filter  = 'gfxcapture', 'ddagrab', 'hwdownload', 'format', 'scale', 'color'
     demuxer = 'gdigrab', 'lavfi', 'mpegts', 'mov' # mov: only for this test's clip check
     muxer   = 'segment', 'mpegts', 'mp4', 'null'
 }

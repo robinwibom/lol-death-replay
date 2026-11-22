@@ -1,5 +1,6 @@
 //! Small Windows helpers, each standing in for a dependency that did much more than this app needs.
 
+use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,6 +11,7 @@ use windows_sys::Win32::System::Registry::{
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
+use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE};
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
@@ -81,6 +83,23 @@ pub fn on_ctrl_shift(key: char, pressed: impl Fn() + Send + 'static) {
             }
         }
     });
+}
+
+// ---- Screen capture ----
+
+/// Leaves a window out of every screen capture (this app's recordings, but also screenshots and
+/// streams), so a replay window still open when you die again doesn't end up in the next clip.
+/// Needs Windows 10 2004 or newer; older versions refuse it and the window stays capturable.
+pub fn exclude_from_capture(hwnd: *mut c_void) {
+    if unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) } == 0 {
+        crate::log("Couldn't hide a window from screen capture; it may show up in clips");
+    }
+}
+
+/// The game window (not the lobby client), as the handle ffmpeg's gfxcapture takes.
+pub fn league_window() -> Option<usize> {
+    let hwnd = unsafe { FindWindowW(null(), wide("League of Legends (TM) Client").as_ptr()) };
+    (!hwnd.is_null()).then_some(hwnd as usize)
 }
 
 // ---- Local time ----

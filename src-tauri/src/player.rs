@@ -4,7 +4,7 @@ use std::path::Path;
 
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
-use crate::settings;
+use crate::{settings, win};
 
 const LABEL: &str = "player";
 
@@ -36,8 +36,13 @@ pub fn show(app: &AppHandle, clip: &Path, title: &str, death_from_end: f64) {
         .focused(false)
         .focusable(false)
         .build();
-    if let Err(e) = built {
-        crate::log(&format!("Couldn't open the replay window: {e}"));
+    match built {
+        Ok(window) => {
+            if let Ok(hwnd) = window.hwnd() {
+                win::exclude_from_capture(hwnd.0); // so dying again with it open doesn't record it
+            }
+        }
+        Err(e) => crate::log(&format!("Couldn't open the replay window: {e}")),
     }
 }
 

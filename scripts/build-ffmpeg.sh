@@ -13,6 +13,7 @@ X264_COMMIT=b35605ace3ddf7c1a5d67a2eb553f034aef41d55 # stable branch
 NV_HEADERS_VERSION=n12.2.72.0 # SDK 12.2: works with NVIDIA drivers 550 and newer
 AMF_VERSION=v1.5.3
 LIBVPL_VERSION=v2.17.0
+MINGW_HEADERS_VERSION=v12.0.0 # just one header, for gfxcapture
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$ROOT/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe}"
@@ -66,12 +67,20 @@ if [ ! -f "$PREFIX/lib/libx264.a" ]; then
         make -j "$JOBS" >/dev/null && make install >/dev/null)
 fi
 
+# --- gfxcapture (Windows Graphics Capture) needs a header MinGW only ships from v12 on ---
+# Ubuntu 24.04 has v11. Without it, ffmpeg's configure quietly leaves gfxcapture out.
+if [ ! -f "$PREFIX/include/windows.graphics.capture.interop.h" ]; then
+    mkdir -p "$PREFIX/include"
+    curl -fsSL -o "$PREFIX/include/windows.graphics.capture.interop.h" \
+        "https://raw.githubusercontent.com/mingw-w64/mingw-w64/$MINGW_HEADERS_VERSION/mingw-w64-headers/include/windows.graphics.capture.interop.h"
+fi
+
 # --- ffmpeg: everything off, then only the pieces recorder.rs uses ---
 fetch https://github.com/FFmpeg/FFmpeg.git "$FFMPEG_VERSION" ffmpeg
 cd ffmpeg
 ./configure \
     --arch=x86_64 --target-os=mingw32 --cross-prefix=$HOST- --pkg-config=pkg-config \
-    --pkg-config-flags=--static --extra-cflags="-I$PREFIX/include" \
+    --pkg-config-flags=--static --extra-cflags="-I$PREFIX/include" --extra-cxxflags="-I$PREFIX/include" \
     --extra-ldflags="-L$PREFIX/lib -static" --extra-libs="-lstdc++" \
     --enable-gpl --enable-version3 --disable-debug --disable-doc --disable-network \
     --disable-everything --disable-autodetect --disable-programs --enable-ffmpeg \
@@ -79,11 +88,12 @@ cd ffmpeg
     `# hardware: GPU encoders + the D3D11 capture path` \
     --enable-ffnvcodec --enable-nvenc --enable-amf --enable-libvpl --enable-d3d11va --enable-libx264 \
     --enable-encoder=h264_nvenc,h264_amf,h264_qsv,libx264 \
-    `# capture: ddagrab (default) and gdigrab ("Compatible"); color is the encoder probe's test input` \
+    `# capture: gfxcapture (the game window), ddagrab (the monitor) and gdigrab ("Compatible");` \
+    `# color is the encoder probe's test input` \
     --enable-indev=gdigrab,lavfi \
     `# their frames arrive "encoded": lavfi as wrapped_avframe, gdigrab as bmp` \
     --enable-decoder=wrapped_avframe,bmp \
-    --enable-filter=ddagrab,hwdownload,format,scale,color,null \
+    --enable-filter=gfxcapture,ddagrab,hwdownload,format,scale,color,null \
     `# recording: rolling .ts segments` \
     --enable-muxer=segment,mpegts,null \
     `# saving a clip: concat the segments, copy into .mp4` \

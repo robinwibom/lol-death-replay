@@ -11,7 +11,7 @@ use tauri::{AppHandle, Manager};
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 
 use crate::live_client::{champion, find_killer, find_player, is_dead, my_names, LiveClient};
-use crate::recorder::{ffmpeg_path, pick_encoder, remove_stale_segments, Recorder};
+use crate::recorder::{ffmpeg_path, next_capture, pick_encoder, remove_stale_segments, Recorder};
 use crate::{player, set_status, settings, win, AppState};
 
 pub fn run(app: AppHandle) {
@@ -25,7 +25,7 @@ pub fn run(app: AppHandle) {
     let mut was_dead = false;
     let mut failed = false; // don't retry recording until the next game
     let mut idle = false; // in a game, but replay and clips are both turned off
-    let mut compatible = false; // fast capture failed this game, so record with gdigrab instead
+    let mut fallback: Option<&str> = None; // a capture method failed this game, so record with this one instead
 
     set_status(&app, "Waiting for game");
     loop {
@@ -35,7 +35,7 @@ pub fn run(app: AppHandle) {
                 crate::log("Game over. Waiting for the next one...");
                 set_status(&app, "Waiting for game");
             }
-            (failed, idle, compatible) = (false, false, false);
+            (failed, idle, fallback) = (false, false, None);
             game_folder = None;
             thread::sleep(Duration::from_secs(2));
             continue;
@@ -47,9 +47,8 @@ pub fn run(app: AppHandle) {
 
         if rec.is_none() {
             let mut s = settings::current(&app);
-            if compatible {
-                s.capture = "gdigrab".into();
-            }
+            // The fast setting tries the game window first; gdigrab is used as is.
+            s.capture = fallback.unwrap_or(if s.capture == "gdigrab" { "gdigrab" } else { "gfxcapture" }).into();
             // Nothing to record for. Checked every loop, so turning one back on starts recording.
             if !s.auto_play && !s.save_clips {
                 if !idle {
@@ -88,10 +87,11 @@ pub fn run(app: AppHandle) {
         let r = rec.as_ref().unwrap();
         if !r.alive() {
             crate::log(&format!("ffmpeg stopped unexpectedly:\n{}", r.error_tail()));
-            if !compatible && settings::current(&app).capture != "gdigrab" {
-                // Desktop Duplication doesn't work on every setup (some dual-GPU laptops, remote desktop).
-                crate::log("Fast capture failed - switching to compatible capture for this game");
-                compatible = true;
+            // Window capture needs a recent ffmpeg and Windows; Desktop Duplication doesn't work on
+            // every setup (some dual-GPU laptops, remote desktop).
+            if let Some(next) = next_capture(r.capture) {
+                crate::log(&format!("{} capture failed - switching to {next} for this game", r.capture));
+                fallback = Some(next);
                 rec = None;
                 continue;
             }

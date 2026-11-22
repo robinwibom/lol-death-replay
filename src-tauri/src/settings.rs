@@ -18,8 +18,9 @@ pub struct Settings {
     pub height: u32,
     /// Not in the settings window: the main display is recorded unless settings.json says otherwise.
     pub monitor: u32,
-    /// "ddagrab" (fast, default) or "gdigrab". Not in the settings window: the app switches to
-    /// gdigrab by itself for the rest of a game when ddagrab fails.
+    /// "ddagrab" (fast, default) or "gdigrab". Not in the settings window. Fast records just the
+    /// game window (gfxcapture) when it can, else the whole monitor (ddagrab); the app moves down
+    /// that list, then to gdigrab, by itself for the rest of a game when one fails.
     pub capture: String,
     /// "auto" or a specific ffmpeg encoder such as "h264_nvenc".
     pub encoder: String,
