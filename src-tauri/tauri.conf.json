@@ -40,7 +40,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "REPLACE_WITH_UPDATER_PUBLIC_KEY (the contents of the .key.pub file from `cargo tauri signer generate`)",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM4MTQ3MUM5NDdEMTk5NzUKUldSMW1kRkh5WEVVT09ySE10MWZlRW55TFFEdUtLRXBaR1N5SDlOYXMrNCtVUTgvMXJENmJGQnoK",
       "endpoints": ["https://github.com/robinwibom/lol-death-replay/releases/latest/download/latest.json"],
       "windows": {
         "installMode": "passive"
