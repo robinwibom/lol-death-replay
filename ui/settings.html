@@ -77,6 +77,7 @@
   .card { background: var(--card); border-radius: 10px; box-shadow: 0 0 0 1px var(--line); }
   .row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 14px; min-height: 52px; }
   .row + .row { border-top: 1px solid var(--line); }
+  .row[hidden] { display: none; }
   .row .label { flex: 1; min-width: 0; }
   .path { display: block; margin-top: 1px; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; }
 
@@ -289,6 +290,10 @@
       <label class="label" for="startWithWindows">Start with Windows</label>
       <span class="switch"><input type="checkbox" id="startWithWindows"><span></span></span>
     </div>
+    <div class="row" id="updateRow" hidden>
+      <span class="label" id="updateText"></span>
+      <button class="btn" id="update">Update and restart</button>
+    </div>
   </div>
 
   <footer>
@@ -429,6 +434,8 @@
     $('status-text').textContent = info.status;
     $('status').className = 'status ' + (info.status.startsWith('Recording this') ? 'recording'
       : info.status.startsWith('Waiting') ? 'waiting' : '');
+    $('updateRow').hidden = !info.update;
+    $('updateText').textContent = `Version ${info.update} is available`;
     return info;
   }
 
@@ -447,6 +454,18 @@
   $('open').addEventListener('click', () => invoke('open_clips_folder'));
   $('log').addEventListener('click', () => invoke('open_log'));
   $('test').addEventListener('click', () => invoke('preview_player').catch((e) => toast(String(e), 'info')));
+  // The installer closes the app and starts the new version, so this only returns on failure.
+  $('update').addEventListener('click', async () => {
+    $('update').disabled = true;
+    $('update').textContent = 'Updating...';
+    try {
+      await invoke('install_update');
+    } catch (e) {
+      toast(String(e), 'error');
+    }
+    $('update').disabled = false;
+    $('update').textContent = 'Update and restart';
+  });
   $('change').addEventListener('click', async () => {
     const dir = await invoke('pick_folder', { start: settings.clipsDir });
     if (dir) {
