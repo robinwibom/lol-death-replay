@@ -5,12 +5,14 @@ mod live_client;
 mod player;
 mod recorder;
 mod settings;
+mod toast;
+mod updater;
 mod watcher;
 mod win;
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -24,7 +26,14 @@ pub struct AppState {
     status_item: MenuItem<Wry>,
     replay_item: MenuItem<Wry>,
     pub last_clip: Mutex<Option<PathBuf>>,
+    /// While a game records: its recorder and clip folder name, for the save hotkey.
+    pub recording: Mutex<Option<(Arc<recorder::Recorder>, String)>>,
+    /// The save hotkey, registered only while a game records.
+    pub save_key: Mutex<Option<win::Hotkey>>,
 }
+
+/// Closes the replay from inside the game. Always registered.
+const CLOSE_KEY: &str = "Ctrl+Shift+X";
 
 static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
 
@@ -49,6 +58,19 @@ pub fn set_status(app: &AppHandle, status: &str) {
     let _ = state.status_item.set_text(status);
 }
 
+/// Registers Ctrl+Shift+X, which closes the replay from inside the game. Kept for the app's lifetime.
+fn arm_close_key(app: &AppHandle) {
+    let app_for_key = app.clone();
+    let pressed = move || {
+        log(&format!("{CLOSE_KEY} pressed - closing the replay"));
+        player::close(&app_for_key);
+    };
+    match win::Hotkey::register(CLOSE_KEY, pressed) {
+        Ok(k) => std::mem::forget(k),
+        Err(e) => log(&e),
+    }
+}
+
 fn open_settings(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("settings") {
         let _ = w.unminimize();
@@ -61,8 +83,13 @@ fn open_settings(app: &AppHandle) {
         .min_inner_size(400.0, 480.0)
         .center()
         .build();
-    if let Err(e) = built {
-        log(&format!("Couldn't open settings: {e}"));
+    match built {
+        Ok(window) => {
+            if let Ok(hwnd) = window.hwnd() {
+                win::exclude_from_capture(hwnd.0); // kept out of clips, like the replay window
+            }
+        }
+        Err(e) => log(&format!("Couldn't open settings: {e}")),
     }
 }
 
@@ -108,6 +135,8 @@ struct Info {
     version: String,
     status: String,
     start_with_windows: bool,
+    /// A newer version to offer, e.g. "0.3.0".
+    update: Option<String>,
 }
 
 #[tauri::command]
@@ -121,14 +150,38 @@ fn get_info(app: AppHandle) -> Info {
         version: app.package_info().version.to_string(),
         status: app.state::<AppState>().status.lock().unwrap().clone(),
         start_with_windows: win::autostart_enabled(&app.package_info().name),
+        update: updater::available(&app),
     }
 }
 
 #[tauri::command]
-fn save_settings(app: AppHandle, new: Settings, start_with_windows: bool) -> Result<(), String> {
+fn save_settings(app: AppHandle, mut new: Settings, start_with_windows: bool) -> Result<(), String> {
+    // A save hotkey that can't be used keeps the old one; the rest of the settings still save.
+    let old_key = settings::current(&app).save_key;
+    let key_error = (new.save_key != old_key).then(|| check_save_key(&new.save_key).err()).flatten();
+    if key_error.is_some() {
+        new.save_key = old_key.clone();
+    }
+    let key_changed = new.save_key != old_key;
     settings::update(&app, |s| *s = new);
+    if key_changed {
+        watcher::arm_save_key(&app); // takes effect now if a game is recording
+    }
     win::set_autostart(&app.package_info().name, start_with_windows)
-        .map_err(|e| format!("Couldn't change start with Windows: {e}"))
+        .map_err(|e| format!("Couldn't change start with Windows: {e}"))?;
+    key_error.map_or(Ok(()), Err)
+}
+
+/// Whether `combo` would work as the save hotkey: a valid combo that no other app (or our own close
+/// key) has. Tries registering it for a moment, since outside a game it isn't registered.
+fn check_save_key(combo: &str) -> Result<(), String> {
+    if combo.is_empty() {
+        return Ok(()); // turned off
+    }
+    if win::parse_hotkey(combo)? == win::parse_hotkey(CLOSE_KEY)? {
+        return Err(format!("{CLOSE_KEY} already closes the replay"));
+    }
+    win::hotkey_is_free(combo)
 }
 
 /// The "Change..." folder picker. Blocks while open, so it runs off the async runtime's threads.
@@ -165,6 +218,12 @@ async fn preview_player(app: AppHandle) -> Result<(), String> {
     replay_last(&app)
 }
 
+/// Only returns if the update failed; the settings window shows why.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    updater::install(app).await
+}
+
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
     let log_dir = app.path().app_log_dir()?;
@@ -177,6 +236,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // Tray icon and menu
     let status_item = MenuItem::with_id(app, "status", "Starting...", false, None::<&str>)?;
     let replay_item = MenuItem::with_id(app, "replay", "Replay last death", true, None::<&str>)?;
+    // Added to the menu only once there's an update.
+    let update_item = MenuItem::with_id(app, "update", "Update", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[
@@ -194,7 +255,10 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         status_item,
         replay_item,
         last_clip: Mutex::new(None),
+        recording: Mutex::new(None),
+        save_key: Mutex::new(None),
     });
+    app.manage(updater::UpdateState::new(update_item, menu.clone()));
     refresh_replay_item(app.handle());
     TrayIconBuilder::with_id("tray")
         .icon(app.default_window_icon().cloned().ok_or("no app icon")?)
@@ -209,6 +273,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             // Normally greyed out with no clips; this catches a clip deleted while the menu was open.
             "replay" => replay_last(app).unwrap_or_else(|e| log(&e)),
+            "update" => drop(tauri::async_runtime::spawn(updater::install(app.clone()))),
             "clips" => open_clips_folder(app.clone()),
             "settings" => open_settings(app),
             "quit" => app.exit(0),
@@ -216,12 +281,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         })
         .build(app)?;
 
-    // Ctrl+Shift+X closes the replay from inside the game.
-    let app_for_key = app.handle().clone();
-    win::on_ctrl_shift('X', move || player::close(&app_for_key));
+    arm_close_key(app.handle());
 
     log(&format!("LoL Death Replay {} started", app.package_info().version));
+    let update_handle = handle.clone();
     std::thread::spawn(move || watcher::run(handle));
+    std::thread::spawn(move || updater::run(update_handle));
     if first_run {
         open_settings(app.handle());
     }
@@ -232,6 +297,7 @@ fn main() {
     tauri::Builder::default()
         // A second launch just opens settings in the running app.
         .plugin(tauri_plugin_single_instance::init(|app, _, _| open_settings(app)))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_settings,
             get_info,
@@ -240,6 +306,7 @@ fn main() {
             open_log,
             pick_folder,
             preview_player,
+            install_update,
             ui_log,
             player::player_close,
             player::player_resize,

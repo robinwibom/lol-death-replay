@@ -31,6 +31,10 @@ It stays on top of the game and never takes your keyboard away from it. Move the
 
 It closes by itself the next time you die (replaced by the new replay) and when the game ends.
 
+### Saving a moment
+
+Not every moment worth keeping is a death. During a game, press **Ctrl+Shift+S** to save the last 15 seconds (the same length as a death replay) as a clip like `12m40s_saved.mp4` in that game's folder. A small "Saved" note shows briefly at the top of the screen; no replay window opens. These clips are saved even with **Save clips** turned off. The hotkey can be changed or turned off in settings, and it's only taken from other apps while a game is being recorded.
+
 ### Settings
 
 Whether to show the replay and whether to save clips (turn both off and it doesn't record at all), how many seconds to keep before and after a death, recording quality (720p to native, 30 or 60 fps), the clips folder and its size limit (oldest clips are deleted first). Recording changes apply from the next game.
@@ -52,7 +56,7 @@ While a match runs, ffmpeg keeps a rolling buffer of 1-second segments. On a dea
 
 Needs [Rust](https://rustup.rs), the Visual Studio C++ Build Tools, and the Tauri CLI (`cargo install tauri-cli --version "^2" --locked`).
 
-1. Put an `ffmpeg.exe` at `src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe`. Any recent Windows build works for development, e.g. from [BtbN](https://github.com/BtbN/FFmpeg-Builds/releases). Releases ship a much smaller one built by `scripts/build-ffmpeg.sh`, which cross-compiles from Linux or WSL and enables only what the app uses. If you use a new ffmpeg feature, enable it there and add it to `scripts/test-ffmpeg.ps1`, which checks an `ffmpeg.exe` has everything the app needs.
+1. Put an `ffmpeg.exe` at `src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe`. Any recent Windows build works for development, e.g. from [BtbN](https://github.com/BtbN/FFmpeg-Builds/releases). Releases ship a much smaller one built by `scripts/build-ffmpeg.sh`, which cross-compiles from Linux or WSL (MinGW-w64 13 or newer, e.g. Ubuntu 26.04) and enables only what the app uses. If you use a new ffmpeg feature, enable it there and add it to `scripts/test-ffmpeg.ps1`, which checks an `ffmpeg.exe` has everything the app needs.
 2. Run it: `cd src-tauri` then `cargo run`
 3. Build the installer: `cargo tauri build` (output in `src-tauri/target/release/bundle/nsis/`)
 

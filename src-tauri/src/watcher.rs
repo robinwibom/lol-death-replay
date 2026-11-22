@@ -11,8 +11,8 @@ use tauri::{AppHandle, Manager};
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 
 use crate::live_client::{champion, find_killer, find_player, is_dead, my_names, LiveClient};
-use crate::recorder::{ffmpeg_path, pick_encoder, remove_stale_segments, Recorder};
-use crate::{player, set_status, settings, win, AppState};
+use crate::recorder::{ffmpeg_path, next_capture, pick_encoder, remove_stale_segments, Recorder};
+use crate::{player, set_status, settings, toast, win, AppState};
 
 pub fn run(app: AppHandle) {
     remove_stale_segments(); // safe here: single-instance means no other copy is recording
@@ -25,17 +25,18 @@ pub fn run(app: AppHandle) {
     let mut was_dead = false;
     let mut failed = false; // don't retry recording until the next game
     let mut idle = false; // in a game, but replay and clips are both turned off
-    let mut compatible = false; // fast capture failed this game, so record with gdigrab instead
+    let mut fallback: Option<&str> = None; // a capture method failed this game, so record with this one instead
 
     set_status(&app, "Waiting for game");
     loop {
         let Some(active) = client.get("activeplayer") else {
             if rec.take().is_some() || failed || idle {
+                set_recording(&app, None);
                 player::close(&app);
                 crate::log("Game over. Waiting for the next one...");
                 set_status(&app, "Waiting for game");
             }
-            (failed, idle, compatible) = (false, false, false);
+            (failed, idle, fallback) = (false, false, None);
             game_folder = None;
             thread::sleep(Duration::from_secs(2));
             continue;
@@ -47,9 +48,8 @@ pub fn run(app: AppHandle) {
 
         if rec.is_none() {
             let mut s = settings::current(&app);
-            if compatible {
-                s.capture = "gdigrab".into();
-            }
+            // The fast setting tries the game window first; gdigrab is used as is.
+            s.capture = fallback.unwrap_or(if s.capture == "gdigrab" { "gdigrab" } else { "gfxcapture" }).into();
             // Nothing to record for. Checked every loop, so turning one back on starts recording.
             if !s.auto_play && !s.save_clips {
                 if !idle {
@@ -72,7 +72,9 @@ pub fn run(app: AppHandle) {
             }
             match Recorder::start(&ffmpeg, &s, &encoder) {
                 Ok(r) => {
-                    rec = Some(Arc::new(r));
+                    let r = Arc::new(r);
+                    set_recording(&app, Some((r.clone(), game_folder.clone().unwrap_or_default())));
+                    rec = Some(r);
                     was_dead = false;
                     set_status(&app, "Recording this game");
                 }
@@ -88,10 +90,12 @@ pub fn run(app: AppHandle) {
         let r = rec.as_ref().unwrap();
         if !r.alive() {
             crate::log(&format!("ffmpeg stopped unexpectedly:\n{}", r.error_tail()));
-            if !compatible && settings::current(&app).capture != "gdigrab" {
-                // Desktop Duplication doesn't work on every setup (some dual-GPU laptops, remote desktop).
-                crate::log("Fast capture failed - switching to compatible capture for this game");
-                compatible = true;
+            set_recording(&app, None);
+            // Window capture needs a recent ffmpeg and Windows; Desktop Duplication doesn't work on
+            // every setup (some dual-GPU laptops, remote desktop).
+            if let Some(next) = next_capture(r.capture) {
+                crate::log(&format!("{} capture failed - switching to {next} for this game", r.capture));
+                fallback = Some(next);
                 rec = None;
                 continue;
             }
@@ -147,12 +151,9 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
     }
     let client = LiveClient::new();
     let killer = find_killer(client.get("eventdata").as_ref(), client.get("playerlist").as_ref(), &names);
-    let game_time = client
-        .get("gamestats")
-        .and_then(|g| g.get("gameTime").and_then(Value::as_f64))
-        .unwrap_or(0.0) as u64;
+    let game_time = game_time(&client);
     let (min, sec) = (game_time / 60, game_time % 60);
-    let name = format!("{min:02}m{sec:02}s_by-{}.mp4", safe(&killer.file));
+    let name = format!("{}_by-{}.mp4", clip_time(game_time), safe(&killer.file));
     let killer = killer.display;
     // Unsaved replays still need a file to play; they go to a temp folder that only holds the latest.
     let dir = if s.save_clips { s.clips_dir.join(&game_folder) } else { unsaved_dir() };
@@ -175,6 +176,79 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
             }
         }
         Err(e) => crate::log(&format!("Clip save failed: {e}")),
+    }
+}
+
+/// Seconds into the game, or 0 if the game doesn't say.
+fn game_time(client: &LiveClient) -> u64 {
+    client.get("gamestats").and_then(|g| g.get("gameTime").and_then(Value::as_f64)).unwrap_or(0.0) as u64
+}
+
+/// How clip names start: the game time, e.g. "12m40s".
+fn clip_time(game_time: u64) -> String {
+    format!("{:02}m{:02}s", game_time / 60, game_time % 60)
+}
+
+// ---- The save hotkey ----
+
+/// Sets what the save hotkey saves from (this game's recorder and clip folder), or `None` when not
+/// recording, then registers or releases the hotkey to match.
+fn set_recording(app: &AppHandle, now: Option<(Arc<Recorder>, String)>) {
+    *app.state::<AppState>().recording.lock().unwrap() = now;
+    arm_save_key(app);
+}
+
+/// Registers the save hotkey from settings while a game is recording, and releases it otherwise, so
+/// the combo (Ctrl+Shift+S is "Save as" in many apps) only belongs to us during a game.
+pub fn arm_save_key(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let mut key = state.save_key.lock().unwrap();
+    *key = None; // released first, so registering the same combo again works
+    let combo = settings::current(app).save_key;
+    if state.recording.lock().unwrap().is_none() {
+        return;
+    }
+    if combo.is_empty() {
+        crate::log("Save hotkey is off (Settings > Clips)");
+        return;
+    }
+    let app_for_key = app.clone();
+    match win::Hotkey::register(&combo, move || save_now(&app_for_key)) {
+        Ok(k) => {
+            crate::log(&format!("Save hotkey {combo} ready"));
+            *key = Some(k);
+        }
+        Err(e) => crate::log(&e),
+    }
+}
+
+fn save_now(app: &AppHandle) {
+    let Some((rec, game_folder)) = app.state::<AppState>().recording.lock().unwrap().clone() else { return };
+    crate::log("Save hotkey pressed - saving...");
+    let app = app.clone();
+    thread::spawn(move || save_moment(app, rec, game_folder));
+}
+
+/// Keeps the last `before` seconds as e.g. "12m40s_saved.mp4": no wait for an "after", no replay
+/// window, just a toast. Goes to the clips folder even with "Save clips" off, since it was asked for.
+fn save_moment(app: AppHandle, rec: Arc<Recorder>, game_folder: String) {
+    let s = settings::current(&app);
+    let name = format!("{}_saved.mp4", clip_time(game_time(&LiveClient::new())));
+    let dir = s.clips_dir.join(&game_folder);
+    let out = dir.join(name);
+    let saved = std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Couldn't create {}: {e}", dir.display()))
+        .and_then(|()| rec.save_last(s.before, &out));
+    match saved {
+        Ok(()) => {
+            crate::log(&format!("Saved {}", out.display()));
+            toast::show(&app, "Saved");
+            prune(&s.clips_dir, (s.max_folder_gb * 1e9) as u64, &out);
+        }
+        Err(e) => {
+            crate::log(&format!("Clip save failed: {e}"));
+            toast::show(&app, "Couldn't save - see log");
+        }
     }
 }
 
@@ -269,6 +343,13 @@ mod tests {
         assert_eq!(safe("Ñunu & Willump"), "unu-Willump"); // non-ASCII is replaced, edges trimmed
         assert_eq!(safe("???"), "unknown");
         assert_eq!(safe(&"x".repeat(80)).len(), 60);
+    }
+
+    #[test]
+    fn names_clips_by_game_time() {
+        assert_eq!(clip_time(760), "12m40s");
+        assert_eq!(clip_time(0), "00m00s");
+        assert_eq!(clip_time(3725), "62m05s");
     }
 
     #[test]

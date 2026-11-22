@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds a small ffmpeg.exe with only what the app uses (see src-tauri/src/recorder.rs).
-# Cross-compiles for Windows from Linux (Ubuntu: see the apt line in .github/workflows/release.yml).
+# Cross-compiles for Windows from Linux with MinGW-w64 13 or newer, which gfxcapture needs
+# (Ubuntu 26.04 or newer: see the apt line in .github/workflows/release.yml).
 #
 #   scripts/build-ffmpeg.sh [output path]     default: src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
 #
@@ -20,6 +21,14 @@ WORK="${WORK:-$ROOT/target-ffmpeg}"
 PREFIX="$WORK/prefix"
 HOST=x86_64-w64-mingw32
 JOBS="$(nproc)"
+
+# Older MinGW headers lack parts of Windows Graphics Capture, and ffmpeg's configure then leaves
+# gfxcapture out without failing. Say so up front instead of after the whole build.
+MINGW_MAJOR="$(echo '#include <_mingw.h>' | $HOST-gcc -x c -dM -E - 2>/dev/null | awk '/define __MINGW64_VERSION_MAJOR/ {print $3}' || true)"
+if [ "${MINGW_MAJOR:-0}" -lt 13 ]; then
+    echo "Needs MinGW-w64 13 or newer (found ${MINGW_MAJOR:-none}); Ubuntu 26.04 has it" >&2
+    exit 1
+fi
 
 mkdir -p "$WORK" "$PREFIX"
 cd "$WORK"
@@ -71,7 +80,7 @@ fetch https://github.com/FFmpeg/FFmpeg.git "$FFMPEG_VERSION" ffmpeg
 cd ffmpeg
 ./configure \
     --arch=x86_64 --target-os=mingw32 --cross-prefix=$HOST- --pkg-config=pkg-config \
-    --pkg-config-flags=--static --extra-cflags="-I$PREFIX/include" \
+    --pkg-config-flags=--static --extra-cflags="-I$PREFIX/include" --extra-cxxflags="-I$PREFIX/include" \
     --extra-ldflags="-L$PREFIX/lib -static" --extra-libs="-lstdc++" \
     --enable-gpl --enable-version3 --disable-debug --disable-doc --disable-network \
     --disable-everything --disable-autodetect --disable-programs --enable-ffmpeg \
@@ -79,11 +88,12 @@ cd ffmpeg
     `# hardware: GPU encoders + the D3D11 capture path` \
     --enable-ffnvcodec --enable-nvenc --enable-amf --enable-libvpl --enable-d3d11va --enable-libx264 \
     --enable-encoder=h264_nvenc,h264_amf,h264_qsv,libx264 \
-    `# capture: ddagrab (default) and gdigrab ("Compatible"); color is the encoder probe's test input` \
+    `# capture: gfxcapture (the game window), ddagrab (the monitor) and gdigrab ("Compatible");` \
+    `# color is the encoder probe's test input` \
     --enable-indev=gdigrab,lavfi \
     `# their frames arrive "encoded": lavfi as wrapped_avframe, gdigrab as bmp` \
     --enable-decoder=wrapped_avframe,bmp \
-    --enable-filter=ddagrab,hwdownload,format,scale,color,null \
+    --enable-filter=gfxcapture,ddagrab,hwdownload,format,scale,color,null \
     `# recording: rolling .ts segments` \
     --enable-muxer=segment,mpegts,null \
     `# saving a clip: concat the segments, copy into .mp4` \
@@ -91,6 +101,12 @@ cd ffmpeg
     --enable-decoder=h264 --enable-parser=h264 --enable-bsf=extract_extradata,h264_mp4toannexb \
     `# reading an .mp4 back: the app doesn't (the WebView plays clips), test-ffmpeg.ps1 does` \
     --enable-demuxer=mov
+# configure leaves out a filter whose requirements fail without saying so. Stop here with the
+# reason, instead of shipping an ffmpeg that can't record the game window.
+if ! grep -q "CONFIG_GFXCAPTURE_FILTER 1" config_components.h; then # filters are here, not config.h
+    echo "gfxcapture was left out (see configure's warning above, and ffbuild/config.log)" >&2
+    exit 1
+fi
 make -j "$JOBS" >/dev/null
 $HOST-strip ffmpeg.exe
 

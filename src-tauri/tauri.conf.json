@@ -30,10 +30,20 @@
       "icons/icon.ico"
     ],
     "externalBin": ["binaries/ffmpeg"],
+    "createUpdaterArtifacts": true,
     "windows": {
       "nsis": {
         "installMode": "currentUser",
         "installerIcon": "icons/icon.ico"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM4MTQ3MUM5NDdEMTk5NzUKUldSMW1kRkh5WEVVT09ySE10MWZlRW55TFFEdUtLRXBaR1N5SDlOYXMrNCtVUTgvMXJENmJGQnoK",
+      "endpoints": ["https://github.com/robinwibom/lol-death-replay/releases/latest/download/latest.json"],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

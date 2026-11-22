@@ -13,6 +13,8 @@ tauri-build = "2"
 # No default features: "compression" would build brotli to squeeze ~60 KB of UI, and the rest is Linux-only.
 tauri = { version = "2", default-features = false, features = ["wry", "common-controls-v6", "tray-icon", "protocol-asset"] }
 tauri-plugin-single-instance = "2"
+# Windows' own TLS, like ureq below, rather than building rustls.
+tauri-plugin-updater = { version = "2", default-features = false, features = ["native-tls"] }
 rfd = { version = "0.17", default-features = false } # the clips folder picker
 ureq = { version = "3", default-features = false, features = ["json", "native-tls-no-default"] }
 serde = { version = "1", features = ["derive"] }
@@ -26,6 +28,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_System_Time",
+    "Win32_UI_Input",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }

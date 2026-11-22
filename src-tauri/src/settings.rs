@@ -18,8 +18,9 @@ pub struct Settings {
     pub height: u32,
     /// Not in the settings window: the main display is recorded unless settings.json says otherwise.
     pub monitor: u32,
-    /// "ddagrab" (fast, default) or "gdigrab". Not in the settings window: the app switches to
-    /// gdigrab by itself for the rest of a game when ddagrab fails.
+    /// "ddagrab" (fast, default) or "gdigrab". Not in the settings window. Fast records just the
+    /// game window (gfxcapture) when it can, else the whole monitor (ddagrab); the app moves down
+    /// that list, then to gdigrab, by itself for the rest of a game when one fails.
     pub capture: String,
     /// "auto" or a specific ffmpeg encoder such as "h264_nvenc".
     pub encoder: String,
@@ -27,6 +28,9 @@ pub struct Settings {
     pub auto_play: bool,
     /// Keep each death's clip in `clips_dir`. When off, the replay uses a temporary file instead.
     pub save_clips: bool,
+    /// During a game, saves the last `before` seconds as a clip. A combo like "Ctrl+Shift+S"
+    /// (see `win::parse_hotkey`); empty turns it off.
+    pub save_key: String,
     /// Replay window size and position, in Windows' scaled pixels. Updated when you move it.
     pub window_width: f64,
     pub window_x: f64,
@@ -48,6 +52,7 @@ impl Default for Settings {
             encoder: "auto".into(),
             auto_play: true,
             save_clips: true,
+            save_key: "Ctrl+Shift+S".into(),
             window_width: 480.0,
             window_x: 20.0,
             window_y: 60.0,

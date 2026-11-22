@@ -108,9 +108,20 @@ pub fn pick_encoder(ffmpeg_exe: &Path) -> String {
         .to_string()
 }
 
+/// Capture methods, best first. When one fails, the next takes over for the rest of the game.
+const CAPTURES: [&str; 3] = ["gfxcapture", "ddagrab", "gdigrab"];
+
+/// The capture method to switch to when `capture` fails, if any is left.
+pub fn next_capture(capture: &str) -> Option<&'static str> {
+    let i = CAPTURES.iter().position(|c| *c == capture)?;
+    CAPTURES.get(i + 1).copied()
+}
+
 pub struct Recorder {
     ffmpeg: PathBuf,
     dir: PathBuf,
+    /// The capture method actually in use: gfxcapture becomes ddagrab when the game window isn't found.
+    pub capture: &'static str,
     child: Mutex<Option<Child>>,
 }
 
@@ -120,17 +131,28 @@ impl Recorder {
         let dir = std::env::temp_dir().join(format!("lol_replay_{stamp}"));
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
-        let input = match s.capture.as_str() {
+        let window = if s.capture == "gfxcapture" { crate::win::league_window() } else { None };
+        if s.capture == "gfxcapture" && window.is_none() {
+            crate::log("Game window not found - recording the whole monitor instead");
+        }
+        let (capture, input) = match (s.capture.as_str(), window) {
             // Older and slower, but works when ddagrab gives black frames.
-            "gdigrab" => vec![
+            ("gdigrab", _) => ("gdigrab", vec![
                 "-f".into(), "gdigrab".into(), "-framerate".into(), s.fps.to_string(),
                 "-draw_mouse".into(), "1".into(), "-i".into(), "desktop".into(),
-            ],
+            ]),
+            // Windows Graphics Capture of the game window alone, on whichever monitor it is, so
+            // nothing on top of it (popups, this app's windows) gets recorded. width/height=-2
+            // round its size down to even numbers, which the encoders need.
+            ("gfxcapture", Some(hwnd)) => ("gfxcapture", vec![
+                "-f".into(), "lavfi".into(), "-i".into(),
+                format!("gfxcapture=hwnd={hwnd}:max_framerate={}:width=-2:height=-2,hwdownload,format=bgra", s.fps),
+            ]),
             // Desktop Duplication API: fast, handles borderless and most fullscreen modes.
-            _ => vec![
+            _ => ("ddagrab", vec![
                 "-f".into(), "lavfi".into(), "-i".into(),
                 format!("ddagrab=output_idx={}:framerate={}:draw_mouse=1,hwdownload,format=bgra", s.monitor, s.fps),
-            ],
+            ]),
         };
         let pix = if encoder == "libx264" { "yuv420p" } else { "nv12" };
         // Never upscale: 1440p on a 1080p screen records at 1080p (ih = the captured height).
@@ -158,8 +180,8 @@ impl Recorder {
             .map_err(|e| format!("couldn't start ffmpeg ({}): {e}", ffmpeg_exe.display()))?;
         tie_to_app(&child);
 
-        crate::log(&format!("Recording started ({}, {encoder}, {} fps, {}p)", s.capture, s.fps, s.height));
-        Ok(Self { ffmpeg: ffmpeg_exe.to_path_buf(), dir, child: Mutex::new(Some(child)) })
+        crate::log(&format!("Recording started ({capture}, {encoder}, {} fps, {}p)", s.fps, s.height));
+        Ok(Self { ffmpeg: ffmpeg_exe.to_path_buf(), dir, capture, child: Mutex::new(Some(child)) })
     }
 
     pub fn alive(&self) -> bool {
@@ -234,5 +256,17 @@ impl Drop for Recorder {
     fn drop(&mut self) {
         self.stop();
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_falls_back_in_order() {
+        assert_eq!(next_capture("gfxcapture"), Some("ddagrab"));
+        assert_eq!(next_capture("ddagrab"), Some("gdigrab"));
+        assert_eq!(next_capture("gdigrab"), None);
     }
 }
