@@ -37,7 +37,7 @@ Not every moment worth keeping is a death. During a game, press **Ctrl+Shift+S**
 
 ### Settings
 
-Whether to show the replay and whether to save clips (turn both off and it doesn't record at all), how many seconds to keep before and after a death, **Include the whole fight** (when you die in a fight, the clip goes back to where the fight started, up to 60 seconds before the death), recording quality (720p to native, 30 or 60 fps), **Record game sound** (only the game's own sound: voice chat, music and other apps stay out of clips), the clips folder and its size limit (oldest clips are deleted first). Recording changes (sound included), and turning on **Include the whole fight**, apply from the next game.
+Whether to show the replay and whether to save clips (turn both off and it doesn't record at all), how many seconds to keep before and after a death, **Include the whole fight** (when you die in a fight, the clip goes back to where the fight started, up to 60 seconds before the death), recording quality (720p to native; 24, 30 or 60 fps: 24 makes clips about 15% smaller, but fast moves look choppier), **Record game sound** (only the game's own sound: voice chat, music and other apps stay out of clips), the clips folder and its size limit (oldest clips are deleted first). Recording changes (sound included), and turning on **Include the whole fight**, apply from the next game.
 
 ## Troubleshooting
 
