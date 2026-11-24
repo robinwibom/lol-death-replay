@@ -12,10 +12,10 @@ function Fail([string]$msg) { Write-Host "FAIL: $msg"; exit 1 }
 
 # 1. Every component recorder.rs names. "ffmpeg -h <kind>=<name>" prints "Unknown ..." when it's missing.
 $needed = @{
-    encoder = 'h264_nvenc', 'h264_amf', 'h264_qsv', 'libx264'
-    decoder = 'wrapped_avframe', 'bmp', 'h264' # lavfi and gdigrab frames; reading segments back
-    filter  = 'gfxcapture', 'ddagrab', 'hwdownload', 'format', 'scale', 'color'
-    demuxer = 'gdigrab', 'lavfi', 'mpegts', 'mov' # mov: only for this test's clip check
+    encoder = 'h264_nvenc', 'h264_amf', 'h264_qsv', 'libx264', 'aac'
+    decoder = 'wrapped_avframe', 'bmp', 'h264', 'pcm_s16le' # lavfi and gdigrab frames; reading segments back; sound
+    filter  = 'gfxcapture', 'ddagrab', 'hwdownload', 'format', 'scale', 'color', 'anull', 'aformat', 'aresample'
+    demuxer = 'gdigrab', 'lavfi', 'mpegts', 'mov', 's16le' # mov: only for this test's clip check
     muxer   = 'segment', 'mpegts', 'mp4', 'null'
 }
 foreach ($kind in $needed.Keys) {
@@ -60,6 +60,23 @@ try {
     $secs = [int]$Matches[1] * 3600 + [int]$Matches[2] * 60 + [double]::Parse($Matches[3], [cultureinfo]::InvariantCulture)
     if ($secs -lt 1.5 -or $secs -gt 3.5) { Fail "clip is $secs s long, expected about 2 (did -sseof work?)" }
     Write-Host "Clip: OK ($secs s)"
+
+    # 5. Save it again with sound, the way save_stream does: 3 s of raw 48 kHz stereo PCM (a tone)
+    # beside the video, encoded to AAC.
+    $samples = New-Object int16[] (48000 * 2 * 3)
+    for ($i = 0; $i -lt $samples.Length; $i++) { $samples[$i] = [int16](3000 * [math]::Sin([math]::Floor($i / 2) * 440 * 2 * [math]::PI / 48000)) }
+    $bytes = New-Object byte[] ($samples.Length * 2)
+    [Buffer]::BlockCopy($samples, 0, $bytes, 0, $bytes.Length)
+    [IO.File]::WriteAllBytes((Join-Path $dir 'sound.pcm'), $bytes)
+    & $Ffmpeg -hide_banner -loglevel error -y -sseof -2 -i $concat -f s16le -ar 48000 -ac 2 -i sound.pcm `
+        -map 0:v -map 1:a -c:a aac -b:a 128k -c:v copy -movflags +faststart sound.mp4
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path sound.mp4)) { Fail "saving the clip with sound failed" }
+    $ErrorActionPreference = 'Continue'
+    $info = & $Ffmpeg -hide_banner -i sound.mp4 2>&1 | Out-String
+    $ErrorActionPreference = 'Stop'
+    if ($info -notmatch 'Stream #\d+:\d+.*Video: h264') { Fail "clip with sound has no h264 video stream:`n$info" }
+    if ($info -notmatch 'Stream #\d+:\d+.*Audio: aac.*48000 Hz, stereo') { Fail "clip with sound has no AAC sound:`n$info" }
+    Write-Host "Clip with sound: OK"
 
     Write-Host "Saving: OK"
 } finally {

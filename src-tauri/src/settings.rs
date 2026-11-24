@@ -21,6 +21,8 @@ pub struct Settings {
     /// When the death ends a fight, keep the whole fight: more than `before`, up to `MAX_BEFORE`.
     pub dynamic_clip: bool,
     pub fps: u32,
+    /// Record the game's sound into clips.
+    pub record_sound: bool,
     /// Recording height in pixels; 0 records at the monitor's native size.
     pub height: u32,
     /// Not in the settings window: the main display is recorded unless settings.json says otherwise.
@@ -54,6 +56,7 @@ impl Default for Settings {
             after: 2.0,
             dynamic_clip: true,
             fps: 30,
+            record_sound: true,
             height: 1080,
             monitor: 0,
             capture: "ddagrab".into(),
