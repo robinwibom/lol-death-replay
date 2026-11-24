@@ -10,7 +10,8 @@ $Ffmpeg = (Resolve-Path $Ffmpeg).Path # absolute: the pipeline below runs in a t
 
 function Fail([string]$msg) { Write-Host "FAIL: $msg"; exit 1 }
 
-# 1. Every component recorder.rs names. "ffmpeg -h <kind>=<name>" prints "Unknown ..." when it's missing.
+# 1. Every component recorder.rs names. "ffmpeg -h <kind>=<name>" starts with "<Kind> <name>" when it's
+# there. Missing ones each say so differently ("Unknown format", "Codec ... is not recognized", ...).
 $needed = @{
     encoder = 'h264_nvenc', 'h264_amf', 'h264_qsv', 'libx264', 'aac'
     decoder = 'wrapped_avframe', 'bmp', 'h264', 'pcm_s16le' # lavfi and gdigrab frames; reading segments back; sound
@@ -21,7 +22,7 @@ $needed = @{
 foreach ($kind in $needed.Keys) {
     foreach ($name in $needed[$kind]) {
         $help = & $Ffmpeg -hide_banner -h "$kind=$name" 2>&1 | Out-String
-        if ($help -cmatch "(?m)^Unknown $kind") { Fail "missing $kind '$name'" }
+        if ($help -notmatch "(?m)^$kind $([regex]::Escape($name))\b") { Fail "missing $kind '$name'" }
     }
 }
 $protocols = & $Ffmpeg -hide_banner -protocols 2>&1 | Out-String
