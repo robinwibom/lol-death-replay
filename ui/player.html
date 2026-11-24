@@ -204,8 +204,9 @@
   #mute .off { display: none; }
   body.muted #mute .on { display: none; }
   body.muted #mute .off { display: block; }
-  /* A clip without sound: the speaker shows "off", dimmed, and does nothing. */
-  body.nosound #mute { opacity: 0.35; cursor: default; }
+  /* A clip without sound: the speaker shows "off", dimmed, and does nothing. Any dimmer and it
+     gets lost over a busy game frame. */
+  body.nosound #mute { opacity: 0.55; cursor: default; }
   body.nosound #mute:hover { background: none; }
   body.nosound #mute:active { transform: none; }
   body.nosound #mute .on { display: none; }
