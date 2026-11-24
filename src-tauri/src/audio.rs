@@ -5,7 +5,6 @@
 //! with the video. Instead every block of sound here is stamped with when it was heard, the video
 //! ring works out when each frame was captured (recorder.rs), and the two meet when a clip is saved.
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
@@ -23,144 +22,97 @@ use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerforma
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::Win32::System::Variant::VT_BLOB;
 
-/// The format sound is kept in: 48 kHz, stereo, 16-bit. Windows converts to it from whatever the
-/// game or the speakers use.
-pub const RATE: u32 = 48_000;
-pub const CHANNELS: usize = 2;
-/// How far the sound may drift from the clock before it's put back in step: padded with silence
-/// when it falls behind (loopback sends nothing while nothing plays), trimmed when it runs ahead
-/// (the sound card's clock is a little fast). Small enough that nobody hears it out of sync.
-const SLACK: u64 = RATE as u64 / 50; // 20 ms
-
-// ---- The in-memory buffer ----
-
-/// The last `keep` of the sound, one sample per channel per frame, frame `n` heard at
-/// `origin + n / RATE`. Gaps are silence, so the position of a sample is its time.
-pub struct AudioRing {
-    origin: Instant,
-    /// Frame number of the first sample kept.
-    first: u64,
-    samples: VecDeque<i16>,
-    keep: u64,
-}
-
-impl AudioRing {
-    pub fn new(origin: Instant, keep: Duration) -> Self {
-        Self { origin, first: 0, samples: VecDeque::new(), keep: frames_in(keep) }
-    }
-
-    fn frame_at(&self, t: Instant) -> u64 {
-        frames_in(t.saturating_duration_since(self.origin))
-    }
-
-    fn end(&self) -> u64 {
-        self.first + (self.samples.len() / CHANNELS) as u64
-    }
-
-    /// Adds `data` (interleaved stereo) whose first frame was heard at `at`, then forgets what's
-    /// older than `keep`.
-    pub fn push(&mut self, data: &[i16], at: Instant) {
-        let want = self.frame_at(at);
-        let mut data = data;
-        if self.samples.is_empty() || want > self.end() + self.keep {
-            // The first sound, or the first after a silence longer than everything kept.
-            self.samples.clear();
-            self.first = want;
-        } else if want > self.end() + SLACK {
-            let gap = (want - self.end()) as usize * CHANNELS;
-            self.samples.extend(std::iter::repeat_n(0, gap));
-        } else if want + SLACK < self.end() {
-            let overlap = ((self.end() - want) as usize * CHANNELS).min(data.len());
-            data = &data[overlap..];
-        }
-        self.samples.extend(data);
-        let frames = (self.samples.len() / CHANNELS) as u64;
-        if frames > self.keep {
-            let extra = frames - self.keep;
-            self.samples.drain(..extra as usize * CHANNELS);
-            self.first += extra;
-        }
-    }
-
-    /// The sound from `from` to the end, with silence in front for any part of it not kept.
-    pub fn since(&self, from: Instant) -> Vec<i16> {
-        let start = self.frame_at(from);
-        if self.samples.is_empty() {
-            return Vec::new();
-        }
-        if start < self.first {
-            let silence = (self.first - start).min(self.keep) as usize * CHANNELS;
-            let mut out = vec![0; silence];
-            out.extend(&self.samples);
-            return out;
-        }
-        let skip = ((start - self.first) as usize * CHANNELS).min(self.samples.len());
-        self.samples.range(skip..).copied().collect()
-    }
-}
-
-fn frames_in(d: Duration) -> u64 {
-    (d.as_secs_f64() * f64::from(RATE)).round() as u64
-}
+use crate::audio_ring::{AudioRing, CHANNELS, RATE};
 
 // ---- Capture ----
+
+/// What the capture thread shares with its owner: the ring it fills, the flag that stops it, and
+/// whether the sound now is everything the speakers play rather than just the game's.
+struct Shared {
+    ring: Mutex<AudioRing>,
+    stop: AtomicBool,
+    all_sound: AtomicBool,
+}
 
 /// Records sound in the background until dropped: the game's alone when Windows can (Windows 10
 /// 2004 and newer), so voice chat and music stay out; everything the speakers play otherwise.
 pub struct Capture {
-    ring: Arc<Mutex<AudioRing>>,
-    stop: Arc<AtomicBool>,
+    shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Capture {
-    /// `game` is the game's process id, if it's known.
+    /// `game` is the game's process id, if it's known; otherwise it's looked for while recording.
     pub fn start(game: Option<u32>, keep: Duration) -> Self {
-        let ring = Arc::new(Mutex::new(AudioRing::new(Instant::now(), keep)));
-        let stop = Arc::new(AtomicBool::new(false));
-        let (to_ring, to_stop) = (ring.clone(), stop.clone());
-        let thread = std::thread::spawn(move || capture_until(game, &to_ring, &to_stop));
-        Self { ring, stop, thread: Some(thread) }
+        let shared = Arc::new(Shared {
+            ring: Mutex::new(AudioRing::new(Instant::now(), keep)),
+            stop: AtomicBool::new(false),
+            all_sound: AtomicBool::new(false),
+        });
+        let to_thread = shared.clone();
+        let thread = std::thread::spawn(move || capture_until(game, &to_thread));
+        Self { shared, thread: Some(thread) }
     }
 
     /// The sound from `from` up to now.
     pub fn since(&self, from: Instant) -> Vec<i16> {
-        self.ring.lock().unwrap().since(from)
+        self.shared.ring.lock().unwrap().since(from)
+    }
+
+    /// Whether the sound now is everything the speakers play (the game's couldn't be recorded alone).
+    pub fn all_sound(&self) -> bool {
+        self.shared.all_sound.load(Ordering::Relaxed)
     }
 }
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.shared.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join(); // within a wait (0.1s) of the flag
         }
     }
 }
 
-/// Captures until `stop`, starting over after errors (the speakers changed, say). Falls back from
-/// the game's sound to all sound, for good, the first time the game's can't be opened.
-fn capture_until(game: Option<u32>, ring: &Mutex<AudioRing>, stop: &AtomicBool) {
-    let _com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok().then_some(ComGuard);
+/// How long to keep looking for the game's process while recording all sound, and how often. Its
+/// window can appear a while after the game is first reported.
+const GAME_SEARCH: Duration = Duration::from_secs(120);
+const GAME_LOOK: Duration = Duration::from_secs(1);
+
+/// Captures until `stop`, starting over after errors (the speakers changed, say). Records all sound
+/// until the game's process turns up (looked for for `GAME_SEARCH`), then the game's alone. Falls back
+/// to all sound, for good, if the game's can't be opened.
+fn capture_until(game: Option<u32>, shared: &Shared) {
+    let _com = init_com();
     let mut game = game;
+    let mut search_until = Some(Instant::now() + GAME_SEARCH);
     if game.is_none() {
-        crate::log("Game process not found - recording all sound instead of just the game's");
+        crate::log("Game process not found yet - recording all sound until it is");
     }
     let mut last_error = String::new();
-    while !stop.load(Ordering::Relaxed) {
-        let opened = match game {
-            Some(pid) => unsafe { open_game(pid) }.map(|c| (c, "the game's sound only")).or_else(|e| {
-                crate::log(&format!("Couldn't record just the game's sound ({e}) - recording all sound instead"));
-                game = None;
-                unsafe { open_speakers() }.map(|c| (c, "all sound"))
-            }),
-            None => unsafe { open_speakers() }.map(|c| (c, "all sound")),
-        };
-        let result = opened.and_then(|(client, what)| {
+    while !shared.stop.load(Ordering::Relaxed) {
+        if game.is_none() && search_until.is_some_and(|t| Instant::now() < t) {
+            game = crate::win::league_process();
+        }
+        let result = open_capture(&mut game, &mut search_until).and_then(|(client, what)| {
             if last_error.is_empty() {
                 crate::log(&format!("Recording {what}"));
             }
-            unsafe { pump(&client, ring, stop) }
+            shared.all_sound.store(game.is_none(), Ordering::Relaxed);
+            // While recording all sound, check now and then whether the game's process has appeared;
+            // when it has, `pump` returns and the loop switches to the game's sound alone.
+            let mut next_look = Instant::now() + GAME_LOOK;
+            let mut game_appeared = || {
+                let searching = game.is_none() && search_until.is_some_and(|t| Instant::now() < t);
+                if !searching || Instant::now() < next_look {
+                    return false;
+                }
+                next_look = Instant::now() + GAME_LOOK;
+                // Keep the process found, so the loop opens its sound without looking again.
+                game = crate::win::league_process();
+                game.is_some()
+            };
+            unsafe { pump(&client, shared, &mut game_appeared) }
         });
         if let Err(e) = result {
             let e = e.to_string();
@@ -169,13 +121,38 @@ fn capture_until(game: Option<u32>, ring: &Mutex<AudioRing>, stop: &AtomicBool) 
                 last_error = e;
             }
             for _ in 0..10 {
-                if stop.load(Ordering::Relaxed) {
+                if shared.stop.load(Ordering::Relaxed) {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
+        } else {
+            // Recovered, so a later error is news again, and the mode is logged when it reopens.
+            last_error.clear();
         }
     }
+}
+
+/// Opens the game's sound when there is a game and Windows can give it. Otherwise, or when that
+/// fails (logged), opens all sound and forgets the game for good, along with the search for it.
+/// Returns the client and what it records.
+fn open_capture(game: &mut Option<u32>, search_until: &mut Option<Instant>) -> Result<(IAudioClient, &'static str)> {
+    if let Some(pid) = *game {
+        match unsafe { open_game(pid) } {
+            Ok(client) => return Ok((client, "the game's sound only")),
+            Err(e) => {
+                crate::log(&format!("Couldn't record just the game's sound ({e}) - recording all sound instead"));
+                *game = None;
+                *search_until = None;
+            }
+        }
+    }
+    unsafe { open_speakers() }.map(|client| (client, "all sound"))
+}
+
+/// Initialises COM on this thread if it can be; the guard uninitialises it when dropped.
+fn init_com() -> Option<ComGuard> {
+    unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok().then_some(ComGuard)
 }
 
 struct ComGuard;
@@ -185,7 +162,8 @@ impl Drop for ComGuard {
     }
 }
 
-fn format() -> WAVEFORMATEX {
+/// The format the capture is opened in: `RATE` and `CHANNELS`, 16-bit PCM.
+fn capture_format() -> WAVEFORMATEX {
     let block = (CHANNELS * 2) as u16;
     WAVEFORMATEX {
         wFormatTag: WAVE_FORMAT_PCM as u16,
@@ -208,15 +186,15 @@ const BUFFER: i64 = 2_000_000;
 
 /// Tells the activation below it's done. Agile, so Windows may call it from any thread.
 #[implement(IActivateAudioInterfaceCompletionHandler, IAgileObject)]
-struct Activated(Mutex<mpsc::Sender<()>>);
+struct ActivationDone(Mutex<mpsc::Sender<()>>);
 
-impl IActivateAudioInterfaceCompletionHandler_Impl for Activated_Impl {
+impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationDone_Impl {
     fn ActivateCompleted(&self, _: Ref<IActivateAudioInterfaceAsyncOperation>) -> Result<()> {
         let _ = self.0.lock().unwrap().send(());
         Ok(())
     }
 }
-impl IAgileObject_Impl for Activated_Impl {}
+impl IAgileObject_Impl for ActivationDone_Impl {}
 
 /// A PROPVARIANT holding a VT_BLOB, laid out the same. Built by hand because the windows crate's
 /// PROPVARIANT frees its blob when dropped, and this blob lives on the stack.
@@ -247,7 +225,7 @@ unsafe fn open_game(pid: u32) -> Result<IAudioClient> {
     };
     const { assert!(size_of::<BlobVariant>() == size_of::<PROPVARIANT>()) };
     let (done, activated) = mpsc::channel();
-    let handler: IActivateAudioInterfaceCompletionHandler = Activated(Mutex::new(done)).into();
+    let handler: IActivateAudioInterfaceCompletionHandler = ActivationDone(Mutex::new(done)).into();
     let op = unsafe {
         ActivateAudioInterfaceAsync(
             VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
@@ -263,7 +241,7 @@ unsafe fn open_game(pid: u32) -> Result<IAudioClient> {
     unsafe { op.GetActivateResult(&mut hr, &mut client) }?;
     hr.ok()?;
     let client: IAudioClient = client.ok_or_else(|| windows::core::Error::from(E_FAIL))?.cast()?;
-    unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, STREAM_FLAGS, BUFFER, 0, &format(), None) }?;
+    unsafe { initialize(&client) }?;
     Ok(client)
 }
 
@@ -272,12 +250,18 @@ unsafe fn open_speakers() -> Result<IAudioClient> {
     let devices: IMMDeviceEnumerator = unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?;
     let speakers = unsafe { devices.GetDefaultAudioEndpoint(eRender, eConsole) }?;
     let client: IAudioClient = unsafe { speakers.Activate(CLSCTX_ALL, None) }?;
-    unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, STREAM_FLAGS, BUFFER, 0, &format(), None) }?;
+    unsafe { initialize(&client) }?;
     Ok(client)
 }
 
-/// Moves sound from `client` into `ring` until `stop` or an error.
-unsafe fn pump(client: &IAudioClient, ring: &Mutex<AudioRing>, stop: &AtomicBool) -> Result<()> {
+/// Initialises `client` for the loopback capture in `capture_format`, both game and speakers alike.
+unsafe fn initialize(client: &IAudioClient) -> Result<()> {
+    unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, STREAM_FLAGS, BUFFER, 0, &capture_format(), None) }
+}
+
+/// Moves sound from `client` into the shared ring until `stop`, an error, or `done()` says to switch
+/// streams.
+unsafe fn pump(client: &IAudioClient, shared: &Shared, done: &mut dyn FnMut() -> bool) -> Result<()> {
     let event = unsafe { CreateEventW(None, false, false, None) }?;
     let _close = HandleGuard(event);
     unsafe { client.SetEventHandle(event) }?;
@@ -285,7 +269,7 @@ unsafe fn pump(client: &IAudioClient, ring: &Mutex<AudioRing>, stop: &AtomicBool
     unsafe { client.Start() }?;
     let clock = QpcClock::new();
     let result = (|| {
-        while !stop.load(Ordering::Relaxed) {
+        while !shared.stop.load(Ordering::Relaxed) && !done() {
             // Loopback may not signal at all while nothing plays, so wake up regularly anyway.
             if unsafe { WaitForSingleObject(event, 100) } == WAIT_FAILED {
                 return Err(windows::core::Error::from_thread());
@@ -300,8 +284,8 @@ unsafe fn pump(client: &IAudioClient, ring: &Mutex<AudioRing>, stop: &AtomicBool
                     unsafe { std::slice::from_raw_parts(data.cast::<i16>(), len) }.to_vec()
                 };
                 unsafe { capture.ReleaseBuffer(frames) }?;
-                let heard = clock.instant(qpc, frames);
-                ring.lock().unwrap().push(&samples, heard);
+                let heard = clock.packet_heard_at(qpc, frames);
+                shared.ring.lock().unwrap().push(&samples, heard);
             }
         }
         Ok(())
@@ -332,7 +316,7 @@ impl QpcClock {
 
     /// When the first of a packet's `frames` was heard. `qpc` is in 100 ns units, as WASAPI gives it;
     /// without a usable one, the packet is taken to have just finished.
-    fn instant(&self, qpc: u64, frames: u32) -> Instant {
+    fn packet_heard_at(&self, qpc: u64, frames: u32) -> Instant {
         let now = Instant::now();
         let mut counter = 0;
         let _ = unsafe { QueryPerformanceCounter(&mut counter) };
@@ -347,50 +331,6 @@ impl QpcClock {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const MS: u64 = RATE as u64 / 1000; // frames per millisecond
-
-    fn tone(frames: u64, value: i16) -> Vec<i16> {
-        vec![value; frames as usize * CHANNELS]
-    }
-
-    #[test]
-    fn keeps_sound_at_its_time() {
-        let t0 = Instant::now();
-        let at = |ms: u64| t0 + Duration::from_millis(ms);
-        let mut ring = AudioRing::new(t0, Duration::from_secs(1));
-        ring.push(&tone(10 * MS, 1), at(100));
-        ring.push(&tone(10 * MS, 2), at(110));
-        // From 105 ms: the second half of the first packet, then the second.
-        let out = ring.since(at(105));
-        assert_eq!(out.len(), 15 * MS as usize * CHANNELS);
-        assert_eq!(out[0], 1);
-        assert_eq!(out[5 * MS as usize * CHANNELS], 2);
-        // From before anything was heard: silence first.
-        let out = ring.since(at(90));
-        assert_eq!(out.len(), 30 * MS as usize * CHANNELS);
-        assert_eq!((out[0], out[10 * MS as usize * CHANNELS]), (0, 1));
-    }
-
-    #[test]
-    fn fills_gaps_with_silence_and_trims_overlaps() {
-        let t0 = Instant::now();
-        let at = |ms: u64| t0 + Duration::from_millis(ms);
-        let mut ring = AudioRing::new(t0, Duration::from_secs(1));
-        ring.push(&tone(10 * MS, 1), at(0));
-        // Nothing played for 90 ms (loopback sends nothing then): silence in between.
-        ring.push(&tone(10 * MS, 2), at(100));
-        assert_eq!(ring.end(), 110 * MS);
-        assert_eq!(ring.since(at(50))[0], 0);
-        assert_eq!(ring.since(at(100))[0], 2);
-        // A packet 30 ms early (the sound card's clock ran fast): its overlap goes.
-        ring.push(&tone(40 * MS, 3), at(80));
-        assert_eq!(ring.end(), 120 * MS);
-        assert_eq!(ring.since(at(110))[0], 3);
-        // Within the slack, packets are just appended: a few ms of jitter isn't a gap.
-        ring.push(&tone(10 * MS, 4), at(125));
-        assert_eq!(ring.end(), 130 * MS);
-    }
 
     /// Plays a quiet tone from this process and records it back through per-process loopback, the
     /// way the game's sound is. Makes a sound for a moment. Run with `cargo test -- --ignored`.
@@ -417,12 +357,12 @@ mod tests {
 
     /// A 440 Hz tone at about 6% volume on the default speakers until `playing` turns false.
     unsafe fn play_tone(playing: &AtomicBool) -> Result<()> {
-        let _com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        let _com = init_com();
         let devices: IMMDeviceEnumerator = unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?;
         let client: IAudioClient =
             unsafe { devices.GetDefaultAudioEndpoint(eRender, eConsole)?.Activate(CLSCTX_ALL, None) }?;
         let flags = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
-        unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, BUFFER, 0, &format(), None) }?;
+        unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, BUFFER, 0, &capture_format(), None) }?;
         let render: IAudioRenderClient = unsafe { client.GetService() }?;
         let size = unsafe { client.GetBufferSize() }?;
         unsafe { client.Start() }?;
@@ -440,18 +380,5 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         unsafe { client.Stop() }
-    }
-
-    #[test]
-    fn forgets_what_is_older_than_keep() {
-        let t0 = Instant::now();
-        let mut ring = AudioRing::new(t0, Duration::from_millis(100));
-        for i in 0..30 {
-            ring.push(&tone(10 * MS, i), t0 + Duration::from_millis(10 * u64::from(i as u16)));
-        }
-        assert_eq!(ring.samples.len(), 100 * MS as usize * CHANNELS);
-        assert_eq!(ring.first, 200 * MS);
-        // Asking for more than is kept gives at most `keep` of silence in front.
-        assert_eq!(ring.since(t0).len(), 200 * MS as usize * CHANNELS);
     }
 }
