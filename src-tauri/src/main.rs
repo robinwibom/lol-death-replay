@@ -137,6 +137,8 @@ struct Info {
     start_with_windows: bool,
     /// A newer version to offer, e.g. "0.3.0".
     update: Option<String>,
+    /// The settings window's limit for "Seconds before death".
+    max_before: f64,
 }
 
 #[tauri::command]
@@ -151,6 +153,7 @@ fn get_info(app: AppHandle) -> Info {
         status: app.state::<AppState>().status.lock().unwrap().clone(),
         start_with_windows: win::autostart_enabled(&app.package_info().name),
         update: updater::available(&app),
+        max_before: settings::MAX_BEFORE,
     }
 }
 

@@ -1,6 +1,6 @@
 # LoL Death Replay
 
-When you die in League of Legends, a small replay window pops up over the game and plays the 15 seconds leading up to your death, so you can see what went wrong while you wait to respawn. Every death is also saved as a clip, named with the game time and who killed you.
+When you die in League of Legends, a small replay window pops up over the game and plays the moments leading up to your death, so you can see what went wrong while you wait to respawn. If you died in a fight, the clip covers the whole fight. Every death is also saved as a clip, named with the game time and who killed you.
 
 It runs quietly in the system tray. It starts recording when a match begins and stops when it ends.
 
@@ -25,7 +25,7 @@ Start **LoLDeathReplay** from the Start menu (or turn on **Start with Windows** 
 It stays on top of the game and never takes your keyboard away from it. Move the mouse over it to show the controls:
 
 - **Drag the video** to move the window, and drag any **edge or corner** to resize it. It opens in the same place next time. Click the video to pause or play.
-- **Timeline**: drag to scrub. The gold **DEATH** section at the end is the interesting part: from about 3 seconds before you died to the end of the clip.
+- **Timeline**: playback starts 5 seconds before the death; drag back to see the rest of the clip. The gold **DEATH** section at the end is the interesting part: from about 3 seconds before you died to the end of the clip.
 - **Bottom row**: back 5s, play/pause and forward 5s; playback speed (0.25× to 2×) on the right. Clips have no sound.
 - **X** (top right) closes it. **Ctrl+Shift+X** also closes it from inside the game.
 
@@ -37,7 +37,7 @@ Not every moment worth keeping is a death. During a game, press **Ctrl+Shift+S**
 
 ### Settings
 
-Whether to show the replay and whether to save clips (turn both off and it doesn't record at all), how many seconds to keep before and after a death, recording quality (720p to native, 30 or 60 fps), the clips folder and its size limit (oldest clips are deleted first). Recording changes apply from the next game.
+Whether to show the replay and whether to save clips (turn both off and it doesn't record at all), how many seconds to keep before and after a death, **Include the whole fight** (when you die in a fight, the clip goes back to where the fight started, up to 60 seconds before the death), recording quality (720p to native, 30 or 60 fps), the clips folder and its size limit (oldest clips are deleted first). Recording changes, and turning on **Include the whole fight**, apply from the next game.
 
 ## Troubleshooting
 
@@ -50,7 +50,7 @@ Whether to show the replay and whether to save clips (turn both off and it doesn
 
 Deaths are detected with Riot's official [Live Client Data API](https://developer.riotgames.com/docs/lol#game-client-api), which the game serves on `https://127.0.0.1:2999` during a match. The app only reads that API and records your screen with ffmpeg, the same way OBS does. It never touches the game client.
 
-While a match runs, ffmpeg keeps a rolling buffer of 1-second segments. On a death, the app waits 2 seconds, joins the last 17 seconds into an `.mp4` and opens it in the replay window.
+While a match runs, ffmpeg streams the recording into the app, which keeps only the last stretch of it in memory (about 30 MB at 1080p, or 90 MB with **Include the whole fight** on, which keeps a full minute). Nothing is written to disk until a clip is saved. On a death, the app waits 2 seconds, writes the last 17 seconds to an `.mp4` and opens it in the replay window. With **Include the whole fight** on, it first looks back through the game's kill events for the fight that ended in your death: earlier kills less than 10 seconds apart that share a player (killer, victim or assister) with the fight count as part of it. The clip then starts 5 seconds before the fight's first kill, up to 60 seconds before the death.
 
 ## Building from source
 

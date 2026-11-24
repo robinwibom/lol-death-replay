@@ -10,7 +10,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager};
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 
-use crate::live_client::{champion, find_killer, find_player, is_dead, my_names, LiveClient};
+use crate::live_client::{champion, find_killer, last_fight, find_player, is_dead, my_names, LiveClient};
 use crate::recorder::{ffmpeg_path, next_capture, pick_encoder, remove_stale_segments, Recorder};
 use crate::{player, set_status, settings, toast, win, AppState};
 
@@ -150,8 +150,22 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
         return;
     }
     let client = LiveClient::new();
-    let killer = find_killer(client.get("eventdata").as_ref(), client.get("playerlist").as_ref(), &names);
-    let game_time = game_time(&client);
+    let events = client.get("eventdata");
+    let killer = find_killer(events.as_ref(), client.get("playerlist").as_ref(), &names);
+    let now = game_seconds(&client);
+    // How long ago the death happened, on the game clock: it's noticed up to a poll late, and the
+    // calls above take time too, so it's a little more than `after`. A latest death further back
+    // than that is an earlier one, because this one isn't in the events yet.
+    let this_death = last_fight(events.as_ref(), &names)
+        .zip(now)
+        .map(|(fight, now)| (now - fight.death, fight.length))
+        .filter(|(ago, _)| (0.0..=s.after + DEATH_LATE).contains(ago));
+    let (since_death, fight_length) = this_death.unwrap_or((s.after, 0.0));
+    let before = s.before_death(fight_length);
+    if before > s.before {
+        crate::log(&format!("Died in a fight - keeping {before:.0}s before the death"));
+    }
+    let game_time = now.unwrap_or(0.0) as u64;
     let (min, sec) = (game_time / 60, game_time % 60);
     let name = format!("{}_by-{}.mp4", clip_time(game_time), safe(&killer.file));
     let killer = killer.display;
@@ -162,12 +176,12 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
         return;
     }
     let out = dir.join(name);
-    match rec.save_last(s.before + s.after, &out) {
+    match rec.save_last(before + since_death, &out) {
         Ok(()) => {
             crate::log(&format!("Saved {} (killed by {killer})", out.display()));
             *app.state::<AppState>().last_clip.lock().unwrap() = Some(out.clone());
             if s.auto_play {
-                player::show(&app, &out, &format!("Death at {min}:{sec:02} - killed by {killer}"), s.after);
+                player::show(&app, &out, &format!("Death at {min}:{sec:02} - killed by {killer}"), since_death);
             }
             if s.save_clips {
                 prune(&s.clips_dir, (s.max_folder_gb * 1e9) as u64, &out);
@@ -179,9 +193,18 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
     }
 }
 
-/// Seconds into the game, or 0 if the game doesn't say.
+/// How much later than `after` a death's event can still be this death's: a poll (0.25s), the API
+/// calls in between, and room to spare.
+const DEATH_LATE: f64 = 5.0;
+
+/// Seconds into the game, if the game says.
+fn game_seconds(client: &LiveClient) -> Option<f64> {
+    client.get("gamestats").and_then(|g| g.get("gameTime").and_then(Value::as_f64))
+}
+
+/// Whole seconds into the game, or 0 if the game doesn't say.
 fn game_time(client: &LiveClient) -> u64 {
-    client.get("gamestats").and_then(|g| g.get("gameTime").and_then(Value::as_f64)).unwrap_or(0.0) as u64
+    game_seconds(client).unwrap_or(0.0) as u64
 }
 
 /// How clip names start: the game time, e.g. "12m40s".

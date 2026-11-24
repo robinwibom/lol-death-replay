@@ -6,6 +6,11 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
+/// The most seconds before a death a clip can hold; also the settings window's limit for `before`.
+pub const MAX_BEFORE: f64 = 60.0;
+/// Seen before a fight's first kill, so the clip shows how the fight started.
+const FIGHT_LEAD: f64 = 5.0;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -13,6 +18,8 @@ pub struct Settings {
     pub before: f64,
     /// Seconds after the death to keep (so the death itself is in the clip).
     pub after: f64,
+    /// When the death ends a fight, keep the whole fight: more than `before`, up to `MAX_BEFORE`.
+    pub dynamic_clip: bool,
     pub fps: u32,
     /// Recording height in pixels; 0 records at the monitor's native size.
     pub height: u32,
@@ -45,6 +52,7 @@ impl Default for Settings {
         Self {
             before: 15.0,
             after: 2.0,
+            dynamic_clip: true,
             fps: 30,
             height: 1080,
             monitor: 0,
@@ -59,6 +67,23 @@ impl Default for Settings {
             max_folder_gb: 10.0,
             clips_dir: PathBuf::new(),
         }
+    }
+}
+
+impl Settings {
+    /// Seconds before a death to keep, when the death ended a fight that lasted `fight` seconds (0
+    /// for none). With "Include the whole fight" on: the fight plus a lead-in, never less than
+    /// `before` and never more than `MAX_BEFORE`. Off: always `before`.
+    pub fn before_death(&self, fight: f64) -> f64 {
+        if !self.dynamic_clip || fight <= 0.0 {
+            return self.before;
+        }
+        (fight + FIGHT_LEAD).min(MAX_BEFORE).max(self.before)
+    }
+
+    /// The most `before_death` can ask for, so the recording knows how much to keep.
+    pub fn max_before_death(&self) -> f64 {
+        self.before_death(f64::INFINITY)
     }
 }
 
@@ -100,5 +125,29 @@ pub fn update(app: &AppHandle, change: impl FnOnce(&mut Settings)) {
     change(&mut s);
     if let Err(e) = save(app, &s) {
         crate::log(&format!("Couldn't save settings: {e}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whole_fight_clips_cover_the_fight() {
+        let s = Settings { before: 15.0, dynamic_clip: true, ..Default::default() };
+        assert_eq!(s.before_death(0.0), 15.0); // no fight: the setting
+        assert_eq!(s.before_death(5.0), 15.0); // a short fight fits in the usual clip
+        assert_eq!(s.before_death(25.0), 30.0); // the fight plus the lead-in
+        assert_eq!(s.before_death(90.0), MAX_BEFORE); // capped
+        assert_eq!(s.max_before_death(), MAX_BEFORE);
+        let long = Settings { before: 50.0, ..s.clone() };
+        assert_eq!(long.before_death(25.0), 50.0); // never shorter than the setting
+    }
+
+    #[test]
+    fn without_the_whole_fight_clips_keep_the_setting() {
+        let s = Settings { before: 15.0, dynamic_clip: false, ..Default::default() };
+        assert_eq!(s.before_death(25.0), 15.0);
+        assert_eq!(s.max_before_death(), 15.0);
     }
 }
