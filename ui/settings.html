@@ -248,7 +248,7 @@
     </div>
     <div class="row">
       <label class="label" for="before">Seconds before death</label>
-      <div class="stepper"><button data-step="-1" aria-label="Fewer seconds"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6h7"/></svg></button><input type="number" id="before" min="5" max="60" step="1"><button data-step="1" aria-label="More seconds"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6h7M6 2.5v7"/></svg></button></div>
+      <div class="stepper"><button data-step="-1" aria-label="Fewer seconds"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6h7"/></svg></button><input type="number" id="before" min="5" step="1"><button data-step="1" aria-label="More seconds"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6h7M6 2.5v7"/></svg></button></div>
     </div>
     <div class="row">
       <label class="label" for="after">Seconds after death</label>
@@ -494,6 +494,7 @@
     const info = await refreshStatus();
     $('version').textContent = `Version ${info.version}`;
     $('startWithWindows').checked = info.startWithWindows;
+    $('before').max = info.maxBefore;
     fill();
     setInterval(refreshStatus, 2000);
   })();

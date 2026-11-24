@@ -10,9 +10,8 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager};
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 
-use crate::live_client::{champion, fight_length, find_killer, find_player, is_dead, my_names, LiveClient};
+use crate::live_client::{champion, find_killer, last_fight, find_player, is_dead, my_names, LiveClient};
 use crate::recorder::{ffmpeg_path, next_capture, pick_encoder, remove_stale_segments, Recorder};
-use crate::settings::MAX_BEFORE;
 use crate::{player, set_status, settings, toast, win, AppState};
 
 pub fn run(app: AppHandle) {
@@ -153,11 +152,20 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
     let client = LiveClient::new();
     let events = client.get("eventdata");
     let killer = find_killer(events.as_ref(), client.get("playerlist").as_ref(), &names);
-    let before = if s.dynamic_clip { clip_before(fight_length(events.as_ref(), &names), s.before) } else { s.before };
+    let now = game_seconds(&client);
+    // How long ago the death happened, on the game clock: it's noticed up to a poll late, and the
+    // calls above take time too, so it's a little more than `after`. A latest death further back
+    // than that is an earlier one, because this one isn't in the events yet.
+    let this_death = last_fight(events.as_ref(), &names)
+        .zip(now)
+        .map(|(fight, now)| (now - fight.death, fight.length))
+        .filter(|(ago, _)| (0.0..=s.after + DEATH_LATE).contains(ago));
+    let (since_death, fight_length) = this_death.unwrap_or((s.after, 0.0));
+    let before = s.before_death(fight_length);
     if before > s.before {
         crate::log(&format!("Died in a fight - keeping {before:.0}s before the death"));
     }
-    let game_time = game_time(&client);
+    let game_time = now.unwrap_or(0.0) as u64;
     let (min, sec) = (game_time / 60, game_time % 60);
     let name = format!("{}_by-{}.mp4", clip_time(game_time), safe(&killer.file));
     let killer = killer.display;
@@ -168,12 +176,12 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
         return;
     }
     let out = dir.join(name);
-    match rec.save_last(before + s.after, &out) {
+    match rec.save_last(before + since_death, &out) {
         Ok(()) => {
             crate::log(&format!("Saved {} (killed by {killer})", out.display()));
             *app.state::<AppState>().last_clip.lock().unwrap() = Some(out.clone());
             if s.auto_play {
-                player::show(&app, &out, &format!("Death at {min}:{sec:02} - killed by {killer}"), s.after);
+                player::show(&app, &out, &format!("Death at {min}:{sec:02} - killed by {killer}"), since_death);
             }
             if s.save_clips {
                 prune(&s.clips_dir, (s.max_folder_gb * 1e9) as u64, &out);
@@ -185,21 +193,18 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
     }
 }
 
-/// Seen before the fight's first kill, so the clip shows how the fight started.
-const FIGHT_LEAD: f64 = 5.0;
+/// How much later than `after` a death's event can still be this death's: a poll (0.25s), the API
+/// calls in between, and room to spare.
+const DEATH_LATE: f64 = 5.0;
 
-/// Seconds before the death a dynamic clip keeps: the fight plus a lead-in, never less than the
-/// `before` setting and never more than `MAX_BEFORE`.
-fn clip_before(fight: f64, before: f64) -> f64 {
-    if fight <= 0.0 {
-        return before;
-    }
-    (fight + FIGHT_LEAD).min(MAX_BEFORE).max(before)
+/// Seconds into the game, if the game says.
+fn game_seconds(client: &LiveClient) -> Option<f64> {
+    client.get("gamestats").and_then(|g| g.get("gameTime").and_then(Value::as_f64))
 }
 
-/// Seconds into the game, or 0 if the game doesn't say.
+/// Whole seconds into the game, or 0 if the game doesn't say.
 fn game_time(client: &LiveClient) -> u64 {
-    client.get("gamestats").and_then(|g| g.get("gameTime").and_then(Value::as_f64)).unwrap_or(0.0) as u64
+    game_seconds(client).unwrap_or(0.0) as u64
 }
 
 /// How clip names start: the game time, e.g. "12m40s".
@@ -361,15 +366,6 @@ mod tests {
         assert_eq!(safe("Ñunu & Willump"), "unu-Willump"); // non-ASCII is replaced, edges trimmed
         assert_eq!(safe("???"), "unknown");
         assert_eq!(safe(&"x".repeat(80)).len(), 60);
-    }
-
-    #[test]
-    fn dynamic_clips_cover_the_fight() {
-        assert_eq!(clip_before(0.0, 15.0), 15.0); // no fight: the setting
-        assert_eq!(clip_before(5.0, 15.0), 15.0); // a short fight fits in the usual clip
-        assert_eq!(clip_before(25.0, 15.0), 30.0); // the fight plus the lead-in
-        assert_eq!(clip_before(90.0, 15.0), MAX_BEFORE); // capped
-        assert_eq!(clip_before(25.0, 50.0), 50.0); // never shorter than the setting
     }
 
     #[test]

@@ -329,13 +329,17 @@
   const setFrac = (el, f) => el.style.setProperty('--p', `${clamp(f, 0, 1) * 100}%`);
 
   // ---- playback ----
-  const togglePlay = () => (video.paused ? video.play() : video.pause());
+  const togglePlay = () => {
+    if (!video.paused) return video.pause();
+    if (video.ended) video.currentTime = 0; // after the end, play starts over from the beginning
+    video.play();
+  };
   const seek = (t) => {
     if (video.duration) video.currentTime = clamp(t, 0, video.duration - 0.01);
   };
 
   // Plays once from START_LEAD before the death and stops on the last frame; pressing play again
-  // starts over from the clip's beginning (the browser rewinds an ended video by itself).
+  // starts over from the clip's beginning (togglePlay).
   // Always starts at 1×; the speed menu changes it while watching.
   // Muted (clips have no sound anyway), so autoplay is always allowed.
   video.play();

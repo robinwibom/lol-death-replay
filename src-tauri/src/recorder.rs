@@ -15,12 +15,14 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 
-use crate::settings::{Settings, MAX_BEFORE};
+use crate::settings::Settings;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Extra seconds kept beyond the longest clip, so there's always a keyframe (one a second) to start at.
 const KEEP_MARGIN: f64 = 3.0;
 const HW_ENCODERS: [&str; 3] = ["h264_nvenc", "h264_amf", "h264_qsv"];
+/// How the recording leaves ffmpeg: MPEG-TS on stdout, each packet passed on as soon as it's made.
+const TO_PIPE: [&str; 6] = ["-an", "-flush_packets", "1", "-f", "mpegts", "pipe:1"];
 
 fn encoder_args(encoder: &str) -> &'static [&'static str] {
     match encoder {
@@ -168,7 +170,7 @@ impl Ring {
 
     /// The stream from the last keyframe at least `seconds` before `now` (or the oldest one kept)
     /// to the end. Starting a little early is fine; starting after a keyframe wouldn't decode.
-    fn last(&self, seconds: f64, now: Instant) -> Vec<u8> {
+    fn since_keyframe_before(&self, seconds: f64, now: Instant) -> Vec<u8> {
         let from = now.checked_sub(Duration::from_secs_f64(seconds)).unwrap_or(now);
         let start = self
             .chunks
@@ -177,6 +179,14 @@ impl Ring {
             .or_else(|| self.chunks.iter().position(|c| c.key))
             .unwrap_or(self.chunks.len());
         self.chunks.range(start..).flat_map(|c| c.bytes.iter().copied()).collect()
+    }
+}
+
+/// Feeds everything ffmpeg writes into `ring` until the stream ends.
+fn fill(ring: &Mutex<Ring>, mut from: impl Read) {
+    let mut buf = vec![0u8; 64 * 1024];
+    while let Ok(n @ 1..) = from.read(&mut buf) {
+        ring.lock().unwrap().push(&buf[..n], Instant::now());
     }
 }
 
@@ -234,16 +244,15 @@ impl Recorder {
         };
         // Room for the longest clip a death can ask for. It's memory (about 1.3 MB a second at
         // 1080p30), so the full minute is only kept with "Include the whole fight" on.
-        let before = if s.dynamic_clip { s.before.max(MAX_BEFORE) } else { s.before };
-        let keep = Duration::from_secs_f64(before + s.after + KEEP_MARGIN);
+        let keep = Duration::from_secs_f64(s.max_before_death() + s.after + KEEP_MARGIN);
 
         let mut child = ffmpeg(ffmpeg_exe)
             .args(["-loglevel", "warning"])
             .args(&input)
             .args(["-vf", &format!("{scale}format={pix}"), "-c:v", encoder])
             .args(encoder_args(encoder))
-            // A keyframe every second, each packet passed on as soon as it's made.
-            .args(["-g", &s.fps.to_string(), "-an", "-flush_packets", "1", "-f", "mpegts", "pipe:1"])
+            .args(["-g", &s.fps.to_string()]) // a keyframe every second
+            .args(TO_PIPE)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -252,14 +261,9 @@ impl Recorder {
         tie_to_app(&child);
 
         let ring = Arc::new(Mutex::new(Ring::new(keep)));
-        let mut stdout = child.stdout.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
         let to_ring = ring.clone();
-        std::thread::spawn(move || {
-            let mut buf = vec![0u8; 64 * 1024];
-            while let Ok(n @ 1..) = stdout.read(&mut buf) {
-                to_ring.lock().unwrap().push(&buf[..n], Instant::now());
-            }
-        });
+        std::thread::spawn(move || fill(&to_ring, stdout));
         let errors = Arc::new(Mutex::new(Vec::new()));
         let stderr = child.stderr.take().unwrap();
         let to_errors = errors.clone();
@@ -304,7 +308,7 @@ impl Recorder {
 
     /// Saves about the last `seconds` as an .mp4, from the keyframe just before (so up to a second more).
     pub fn save_last(&self, seconds: f64, out: &Path) -> Result<(), String> {
-        let stream = self.ring.lock().unwrap().last(seconds, Instant::now());
+        let stream = self.ring.lock().unwrap().since_keyframe_before(seconds, Instant::now());
         save_stream(&self.ffmpeg, stream, out)
     }
 }
@@ -352,13 +356,23 @@ mod tests {
         assert_eq!(next_capture("gdigrab"), None);
     }
 
-    /// A TS packet: PAT (pid 0), a keyframe start (random access indicator set) or other video.
-    fn packet(kind: &str) -> Vec<u8> {
+    #[derive(PartialEq)]
+    enum Kind {
+        /// The PAT (pid 0).
+        Pat,
+        /// The start of a keyframe: video with the random access indicator set.
+        Key,
+        /// Any other video.
+        Video,
+    }
+    use Kind::*;
+
+    fn packet(kind: Kind) -> Vec<u8> {
         let mut p = vec![0xffu8; TS_PACKET];
         p[0] = 0x47;
-        let pid: u16 = if kind == "pat" { 0 } else { 256 };
+        let pid: u16 = if kind == Pat { 0 } else { 256 };
         (p[1], p[2], p[3]) = ((pid >> 8) as u8, pid as u8, 0x10);
-        if kind == "key" {
+        if kind == Key {
             (p[3], p[4], p[5]) = (0x30, 1, 0x40);
         }
         p
@@ -372,32 +386,32 @@ mod tests {
         // Every second: PAT + keyframe + video. Every half second between: PAT + video.
         for i in 0..10 {
             let s = f64::from(i);
-            ring.push(&[packet("pat"), packet("key"), packet("video")].concat(), at(s));
-            ring.push(&[packet("pat"), packet("video")].concat(), at(s + 0.5));
+            ring.push(&[packet(Pat), packet(Key), packet(Video)].concat(), at(s));
+            ring.push(&[packet(Pat), packet(Video)].concat(), at(s + 0.5));
         }
         // Chunks more than 5s older than the newest (9.5) are gone, so 4.5 is the oldest left.
         assert_eq!(ring.chunks.front().unwrap().at, at(4.5));
 
         // The last 2s from 9.5: the keyframe at 7.0 is the last one at or before 7.5, so the chunks
         // from 7, 7.5, 8, 8.5, 9 and 9.5: three of 3 packets and three of 2.
-        let last = ring.last(2.0, at(9.5));
+        let last = ring.since_keyframe_before(2.0, at(9.5));
         assert_eq!(last.len(), 15 * TS_PACKET);
-        assert_eq!(&last[..TS_PACKET], &packet("pat")[..]); // starts at the PAT before the keyframe
-        assert_eq!(&last[TS_PACKET..2 * TS_PACKET], &packet("key")[..]);
+        assert_eq!(&last[..TS_PACKET], &packet(Pat)[..]); // starts at the PAT before the keyframe
+        assert_eq!(&last[TS_PACKET..2 * TS_PACKET], &packet(Key)[..]);
 
         // More than is kept: from the oldest keyframe (5.0), skipping 4.5 which has none.
-        assert_eq!(ring.last(60.0, at(9.5)).len(), 5 * 5 * TS_PACKET); // 5 seconds of 5 packets
+        assert_eq!(ring.since_keyframe_before(60.0, at(9.5)).len(), 5 * 5 * TS_PACKET); // 5 seconds of 5 packets
     }
 
     #[test]
     fn ring_joins_packets_split_across_reads() {
         let mut ring = Ring::new(Duration::from_secs(5));
-        let data = [packet("pat"), packet("key")].concat();
+        let data = [packet(Pat), packet(Key)].concat();
         let now = Instant::now();
         ring.push(&data[..100], now);
         ring.push(&data[100..300], now);
         ring.push(&data[300..], now);
-        assert_eq!(ring.last(0.0, now), data);
+        assert_eq!(ring.since_keyframe_before(0.0, now), data);
     }
 
     /// Records a few seconds through the real ffmpeg, the way a game is, and saves the end of it.
@@ -409,20 +423,17 @@ mod tests {
         let mut child = ffmpeg(&exe)
             .args(["-loglevel", "error", "-re", "-f", "lavfi", "-i", "color=c=red:s=640x360:r=30:d=4"])
             .args(["-vf", "format=yuv420p", "-c:v", "libx264", "-preset", "ultrafast", "-g", "30"])
-            .args(["-an", "-flush_packets", "1", "-f", "mpegts", "pipe:1"])
+            .args(TO_PIPE)
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        let mut ring = Ring::new(Duration::from_secs(10));
-        let mut stdout = child.stdout.take().unwrap();
-        let mut buf = vec![0u8; 64 * 1024];
-        while let Ok(n @ 1..) = stdout.read(&mut buf) {
-            ring.push(&buf[..n], Instant::now());
-        }
+        let ring = Mutex::new(Ring::new(Duration::from_secs(10)));
+        fill(&ring, child.stdout.take().unwrap());
         child.wait().unwrap();
+        let ring = ring.into_inner().unwrap();
 
         let out = std::env::temp_dir().join(format!("ring_test_{}.mp4", std::process::id()));
-        save_stream(&exe, ring.last(2.0, Instant::now()), &out).unwrap();
+        save_stream(&exe, ring.since_keyframe_before(2.0, Instant::now()), &out).unwrap();
         // ffmpeg reads it back without errors; its length is 2s plus up to a second to the keyframe.
         let probe = ffmpeg(&exe)
             .args(["-v", "error", "-i"])

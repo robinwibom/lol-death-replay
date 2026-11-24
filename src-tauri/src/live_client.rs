@@ -115,14 +115,22 @@ pub fn find_killer(events: Option<&Value>, players: Option<&Value>, names: &Hash
 /// Kills further apart than this (in seconds) are separate fights.
 const FIGHT_GAP: f64 = 10.0;
 
-/// How long the fight that ended in the local player's latest death had been going, in seconds:
-/// from the first kill of the fight to the death. 0 when the death was the fight's only kill.
+/// The local player's latest death, and the fight it ended.
+pub struct Fight {
+    /// When the death happened, in game seconds.
+    pub death: f64,
+    /// How long the fight had been going, in seconds: from its first kill to the death. 0 when the
+    /// death was the fight's only kill.
+    pub length: f64,
+}
+
+/// The local player's latest death in `events` and the fight that led to it, if they've died.
 ///
 /// The API has no positions, so a fight is told apart from kills elsewhere on the map by who took
 /// part: it starts as the death's killer, assisters and victim, and an earlier kill joins it when it
 /// happened within `FIGHT_GAP` of the fight's earliest kill so far and shares someone with it (its
 /// killer, victim or an assister). Its people then join the fight too.
-pub fn fight_length(events: Option<&Value>, names: &HashSet<String>) -> f64 {
+pub fn last_fight(events: Option<&Value>, names: &HashSet<String>) -> Option<Fight> {
     let kills: Vec<&Value> = events
         .and_then(|e| e.get("Events"))
         .and_then(Value::as_array)
@@ -131,9 +139,7 @@ pub fn fight_length(events: Option<&Value>, names: &HashSet<String>) -> f64 {
         .filter(|ev| ev.get("EventName").and_then(Value::as_str) == Some("ChampionKill"))
         .collect();
     let victim = |ev: &Value| ev.get("VictimName").and_then(Value::as_str).unwrap_or("").to_string();
-    let Some(death) = kills.iter().rposition(|ev| is_me(&victim(ev), names)) else {
-        return 0.0;
-    };
+    let death = kills.iter().rposition(|ev| is_me(&victim(ev), names))?;
     let time = |ev: &Value| ev.get("EventTime").and_then(Value::as_f64).unwrap_or(0.0);
     let people = |ev: &Value| -> Vec<String> {
         let assisters = ev.get("Assisters").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
@@ -160,7 +166,7 @@ pub fn fight_length(events: Option<&Value>, names: &HashSet<String>) -> f64 {
             start = start.min(t);
         }
     }
-    death_time - start
+    Some(Fight { death: death_time, length: death_time - start })
 }
 
 /// Internal names the API uses for non-champion killers, e.g. "Turret_TChaos_L1_P2_2237424422" or
@@ -248,15 +254,16 @@ mod tests {
     #[test]
     fn measures_the_fight_before_a_death() {
         let names = my_names(&serde_json::json!({ "riotId": "Robin#EUW" }));
-        let length = |events: Vec<Value>| fight_length(Some(&serde_json::json!({ "Events": events })), &names);
+        let fight = |events: Vec<Value>| last_fight(Some(&serde_json::json!({ "Events": events })), &names);
+        let length = |events: Vec<Value>| fight(events).map_or(0.0, |f| f.length);
 
         // A death on its own, and no death at all.
         assert_eq!(length(vec![kill(300.0, "Faker", "Robin", &[])]), 0.0);
-        assert_eq!(length(vec![kill(300.0, "Robin", "Faker", &[])]), 0.0);
+        assert!(fight(vec![kill(300.0, "Robin", "Faker", &[])]).is_none());
 
         // A teamfight: Ally dies to Zed (who then helps kill Robin), Robin kills Lux before that.
         // An unrelated kill in the middle (another lane) neither joins nor breaks the chain.
-        let fight = vec![
+        let teamfight = vec![
             kill(100.0, "Old", "Fight", &[]),          // too long before: a different fight
             kill(280.0, "Robin", "Lux", &["Ally"]),    // shares Robin
             kill(286.0, "Top1", "Top2", &[]),          // nobody from the fight
@@ -264,7 +271,8 @@ mod tests {
             kill(295.0, "Faker", "Robin#EUW", &["Zed"]), // the death; Riot ID tags are ignored
             kill(297.0, "Zed", "Ally2", &[]),          // after the death: not part of what led to it
         ];
-        assert_eq!(length(fight), 15.0);
+        assert_eq!(fight(teamfight.clone()).map(|f| f.death), Some(295.0));
+        assert_eq!(length(teamfight), 15.0);
 
         // A gap longer than FIGHT_GAP ends the chain even if the same people fight again.
         let two_fights = vec![kill(270.0, "Faker", "Ally", &[]), kill(295.0, "Faker", "Robin", &[])];
