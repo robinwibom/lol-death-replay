@@ -170,6 +170,7 @@ fn save_settings(app: AppHandle, mut new: Settings, start_with_windows: bool) ->
         new.save_key = old_key.clone();
     }
     let key_changed = new.save_key != old_key;
+    new.max_folder_gb = new.max_folder_gb.min(settings::MAX_FOLDER_GB);
     settings::update(&app, |s| *s = new);
     if key_changed {
         watcher::arm_save_key(&app); // takes effect now if a game is recording
@@ -295,6 +296,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     std::thread::spawn(move || watcher::run(handle));
     std::thread::spawn(move || updater::run(update_handle));
     if first_run {
+        // Start with Windows is on by default. Debug builds leave it alone, so a dev run doesn't
+        // put target\debug's exe in the real Run key.
+        if !cfg!(debug_assertions) {
+            let name = &app.package_info().name;
+            win::set_autostart(name, true).unwrap_or_else(|e| log(&format!("Couldn't turn on start with Windows: {e}")));
+        }
         open_settings(app.handle());
     }
     Ok(())

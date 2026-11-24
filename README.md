@@ -13,7 +13,7 @@ The installer isn't code-signed. Windows SmartScreen may warn about it (choose *
 
 ## Use
 
-Start **LoLDeathReplay** from the Start menu (or turn on **Start with Windows** in its settings). A gold replay icon appears in the tray; click it for:
+Start **LoLDeathReplay** from the Start menu (it starts with Windows by default; turn off **Start with Windows** in its settings to stop that). A gold replay icon appears in the tray; click it for:
 
 - **Replay last death**
 - **Open clips folder** (by default `Videos\LoLDeathReplay`)
@@ -35,11 +35,11 @@ It closes by itself the next time you die (replaced by the new replay) and when 
 
 ### Saving a moment
 
-Not every moment worth keeping is a death. During a game, press **Ctrl+Shift+S** to save the last 15 seconds (the same length as a death replay) as a clip like `12m40s_saved.mp4` in that game's folder. A small "Saved" note shows briefly at the top of the screen; no replay window opens. These clips are saved even with **Save clips** turned off. The hotkey can be changed or turned off in settings. It only works while a game is being recorded, and it never takes the keys from other apps: the app in front still gets them too.
+Not every moment worth keeping is a death. During a game, press **Ctrl+Shift+S** to save the last 12 seconds (the same length as a death replay) as a clip like `12m40s_saved.mp4` in that game's folder. A small "Saved" note shows briefly at the top of the screen; no replay window opens. These clips are saved even with **Save clips** turned off. The hotkey can be changed or turned off in settings. It only works while a game is being recorded, and it never takes the keys from other apps: the app in front still gets them too.
 
 ### Settings
 
-Whether to show the replay and whether to save clips (turn both off and it doesn't record at all), how many seconds to keep before and after a death, **Include the whole fight** (when you die in a fight, the clip goes back to where the fight started, up to 60 seconds before the death), recording quality (720p to native; 24, 30, 60 or 120 fps: 24 makes clips about 15% smaller but fast moves look choppier, and 120 only helps on a monitor and game running at 120 or more, with clips and memory use growing to match), **Record game sound** (only the game's own sound: voice chat, music and other apps stay out of clips), the clips folder and its size limit (oldest clips are deleted first). Recording changes (sound included), and turning on **Include the whole fight**, apply from the next game.
+Whether to show the replay and whether to save clips (turn both off and it doesn't record at all), how many seconds to keep before and after a death, **Include the whole fight** (when you die in a fight, the clip goes back to where the fight started, up to 60 seconds before the death), recording quality (720p to native; 24, 30, 60 or 120 fps: 24 makes clips about 15% smaller but fast moves look choppier, and 120 only helps on a monitor and game running at 120 or more, with clips and memory use growing to match), **Record game sound** (only the game's own sound: voice chat, music and other apps stay out of clips), the clips folder and its size limit (up to 20 GB; oldest clips are deleted first). Recording changes (sound included), and turning on **Include the whole fight**, apply from the next game.
 
 ## Troubleshooting
 
@@ -54,7 +54,7 @@ Deaths are detected with Riot's official [Live Client Data API](https://develope
 
 While a match runs, ffmpeg streams the recording into the app, which keeps only the last stretch of it in memory (about 20 MB at 1080p, or 55 MB with **Include the whole fight** on, which keeps a full minute, plus 4 or 12 MB of sound). Nothing is written to disk until a clip is saved.
 
-Sound is recorded by the app itself, with Windows' per-process loopback (Windows 10 2004 or newer): only what the game plays, the same audio Windows sends to your speakers. Where that isn't available, it records everything the speakers play instead, and the status says so (voice chat may be included). The app keeps looking for the game's process for up to two minutes, in case it starts after the game is reported. The sound is kept beside the video and only joined to it when a clip is saved: the app notes when each bit of sound was heard and works out when each video frame was captured, so they line up to within about 20 milliseconds. Clips carry it as AAC at 128 kbps, about 1 MB a minute. On a death, the app waits 2 seconds, writes the last 17 seconds to an `.mp4` and opens it in the replay window. With **Include the whole fight** on, it first looks back through the game's kill events for the fight that ended in your death: earlier kills less than 10 seconds apart that share a player (killer, victim or assister) with the fight count as part of it. The clip then starts 5 seconds before the fight's first kill, up to 60 seconds before the death.
+Sound is recorded by the app itself, with Windows' per-process loopback (Windows 10 2004 or newer): only what the game plays, the same audio Windows sends to your speakers. Where that isn't available, it records everything the speakers play instead, and the status says so (voice chat may be included). The app keeps looking for the game's process for up to two minutes, in case it starts after the game is reported. The sound is kept beside the video and only joined to it when a clip is saved: the app notes when each bit of sound was heard and works out when each video frame was captured, so they line up to within about 20 milliseconds. Clips carry it as AAC at 128 kbps, about 1 MB a minute. On a death, the app waits 1 second, writes the last 13 seconds to an `.mp4` and opens it in the replay window. With **Include the whole fight** on, it first looks back through the game's kill events for the fight that ended in your death: earlier kills less than 10 seconds apart that share a player (killer, victim or assister) with the fight count as part of it. The clip then starts 5 seconds before the fight's first kill, up to 60 seconds before the death.
 
 ## Building from source
 
