@@ -16,12 +16,13 @@ use crate::{player, set_status, settings, toast, win, AppState};
 
 pub fn run(app: AppHandle) {
     remove_stale_segments(); // safe here: single-instance means no other copy is recording
+    move_into_day_folders(&settings::current(&app).clips_dir);
     let client = LiveClient::new();
     let ffmpeg = ffmpeg_path();
     let mut auto_encoder: Option<String> = None;
     let mut rec: Option<Arc<Recorder>> = None;
     let mut names = HashSet::new();
-    let mut game_folder: Option<String> = None; // where this game's clips go, decided once per game
+    let mut game_folder: Option<PathBuf> = None; // where this game's clips go, decided once per game
     let mut was_dead = false;
     let mut shown_all_sound = false; // whether the status currently says the sound is all sound
     let mut failed = false; // don't retry recording until the next game
@@ -134,8 +135,9 @@ fn recording_status(all_sound: bool) -> &'static str {
     }
 }
 
-/// The folder name for the game being played, e.g. "2026-11-21_2130_Jinx_ARAM".
-fn current_game_folder(client: &LiveClient, names: &HashSet<String>) -> String {
+/// Where the game being played keeps its clips, inside the clips folder: its day's folder, then
+/// its own, e.g. "2026-11-21\2130_Jinx_ARAM".
+fn current_game_folder(client: &LiveClient, names: &HashSet<String>) -> PathBuf {
     let stats = client.get("gamestats");
     let stat = |key: &str| stats.as_ref().and_then(|g| g.get(key).cloned());
     let game_time = stat("gameTime").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -146,10 +148,11 @@ fn current_game_folder(client: &LiveClient, names: &HashSet<String>) -> String {
         .map_or_else(|| "Unknown".to_string(), |c| c.file);
     // When the game started, not when we noticed it, so starting the app mid-game names it the same.
     let started = win::local_time(SystemTime::now() - Duration::from_secs_f64(game_time.max(0.0)));
-    safe(&game_folder_name(&started, &champ, &mode))
+    game_folder(&started, &champ, &mode)
 }
 
-fn game_folder_name(t: &SYSTEMTIME, champion: &str, mode: &str) -> String {
+/// A game that runs past midnight stays in the day it started.
+fn game_folder(t: &SYSTEMTIME, champion: &str, mode: &str) -> PathBuf {
     let mode = match mode {
         "CLASSIC" => "SR",
         "CHERRY" => "Arena",
@@ -157,10 +160,11 @@ fn game_folder_name(t: &SYSTEMTIME, champion: &str, mode: &str) -> String {
         "" => "Unknown",
         other => other,
     };
-    format!("{}-{:02}-{:02}_{:02}{:02}_{champion}_{mode}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute)
+    let day = format!("{}-{:02}-{:02}", t.wYear, t.wMonth, t.wDay);
+    Path::new(&day).join(safe(&format!("{:02}{:02}_{champion}_{mode}", t.wHour, t.wMinute)))
 }
 
-fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game_folder: String) {
+fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game_folder: PathBuf) {
     let s = settings::current(&app);
     thread::sleep(Duration::from_secs_f64(s.after)); // capture the death itself
     if !rec.alive() {
@@ -233,7 +237,7 @@ fn clip_time(game_time: u64) -> String {
 
 /// Sets what the save hotkey saves from (this game's recorder and clip folder), or `None` when not
 /// recording, then registers or releases the hotkey to match.
-fn set_recording(app: &AppHandle, now: Option<(Arc<Recorder>, String)>) {
+fn set_recording(app: &AppHandle, now: Option<(Arc<Recorder>, PathBuf)>) {
     *app.state::<AppState>().recording.lock().unwrap() = now;
     arm_save_key(app);
 }
@@ -271,7 +275,7 @@ fn save_now(app: &AppHandle) {
 
 /// Keeps the last `before` seconds as e.g. "12m40s_saved.mp4": no wait for an "after", no replay
 /// window, just a toast. Goes to the clips folder even with "Save clips" off, since it was asked for.
-fn save_moment(app: AppHandle, rec: Arc<Recorder>, game_folder: String) {
+fn save_moment(app: AppHandle, rec: Arc<Recorder>, game_folder: PathBuf) {
     let s = settings::current(&app);
     let name = format!("{}_saved.mp4", clip_time(game_time(&LiveClient::new())));
     let dir = s.clips_dir.join(&game_folder);
@@ -290,6 +294,41 @@ fn save_moment(app: AppHandle, rec: Arc<Recorder>, game_folder: String) {
             toast::show(&app, "Couldn't save - see log");
         }
     }
+}
+
+/// Moves game folders from older versions' layout ("2026-11-21_2130_Jinx_SR", right in the clips
+/// folder) into day folders ("2026-11-210_Jinx_SR"). Renames on the same drive: nothing is
+/// copied. One that can't move now (a clip in it is open, say) is tried again on the next start.
+fn move_into_day_folders(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut moved = 0;
+    for path in entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()) {
+        let Some((day, game)) = path.file_name().and_then(|n| n.to_str()).and_then(old_game_folder) else { continue };
+        // The clips folder may be one the user keeps other things in: only clips folders move.
+        let only_clips = std::fs::read_dir(&path).is_ok_and(|mut files| {
+            files.all(|f| f.is_ok_and(|f| f.path().is_file() && f.path().extension().is_some_and(|x| x == "mp4")))
+        });
+        let to = dir.join(day).join(game);
+        if !only_clips || to.exists() {
+            continue;
+        }
+        match std::fs::create_dir_all(dir.join(day)).and_then(|()| std::fs::rename(&path, &to)) {
+            Ok(()) => moved += 1,
+            Err(e) => crate::log(&format!("Couldn't move {} into its day's folder: {e}", path.display())),
+        }
+    }
+    if moved > 0 {
+        crate::log(&format!("Moved {moved} games into day folders"));
+    }
+}
+
+/// "2026-11-21_2130_Jinx_SR" -> ("2026-11-21", "2130_Jinx_SR"); None for any other name.
+fn old_game_folder(name: &str) -> Option<(&str, &str)> {
+    let b = name.as_bytes();
+    let digits = |from: usize, to: usize| b.get(from..to).is_some_and(|d| d.iter().all(u8::is_ascii_digit));
+    let shape = digits(0, 4) && b.get(4) == Some(&b'-') && digits(5, 7) && b.get(7) == Some(&b'-')
+        && digits(8, 10) && b.get(10) == Some(&b'_') && digits(11, 15) && b.get(15) == Some(&b'_') && b.len() > 16;
+    shape.then(|| (&name[..10], &name[11..]))
 }
 
 fn unsaved_dir() -> PathBuf {
@@ -313,30 +352,34 @@ fn safe(s: &str) -> String {
     if cleaned.is_empty() { "unknown".into() } else { cleaned }
 }
 
-/// Every clip in `dir` and in its game folders (one level down), as (modified, size, path).
+/// Every clip in `dir`, as (modified, size, path): in its day folders' game folders (two levels
+/// down), and in game folders right inside it (one level down: older versions' layout, and any a
+/// move into day folders couldn't do).
 pub fn clips(dir: &Path) -> Vec<(SystemTime, u64, PathBuf)> {
     let mut found = vec![];
-    let Ok(entries) = std::fs::read_dir(dir) else { return found };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        let files: Vec<PathBuf> = if path.is_dir() {
-            std::fs::read_dir(&path).into_iter().flatten().filter_map(|e| e.ok()).map(|e| e.path()).collect()
-        } else {
-            vec![path]
-        };
-        for file in files.into_iter().filter(|p| p.extension().is_some_and(|x| x == "mp4")) {
-            if let Some(meta) = file.metadata().ok().filter(|m| m.is_file()) {
-                if let Ok(modified) = meta.modified() {
-                    found.push((modified, meta.len(), file));
-                }
+    find_clips(dir, 2, &mut found);
+    found
+}
+
+fn find_clips(dir: &Path, levels_down: u32, found: &mut Vec<(SystemTime, u64, PathBuf)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
+        let Ok(meta) = path.metadata() else { continue };
+        if meta.is_dir() {
+            if levels_down > 0 {
+                find_clips(&path, levels_down - 1, found);
+            }
+        } else if path.extension().is_some_and(|x| x == "mp4") {
+            if let Ok(modified) = meta.modified() {
+                found.push((modified, meta.len(), path));
             }
         }
     }
-    found
 }
 
 /// Deletes whole games, oldest first, until the folder's clips total at most `max_bytes`.
 /// A game is a game folder, or a single clip directly in `dir` (how the unsaved-replays folder holds them).
+/// A day folder goes with its last game.
 /// The game holding `newest` (the clip just saved) is never deleted, even if it alone is over the limit.
 fn prune(dir: &Path, max_bytes: u64, newest: &Path) {
     let group_of = |clip: &Path| -> PathBuf {
@@ -367,6 +410,9 @@ fn prune(dir: &Path, max_bytes: u64, newest: &Path) {
         let removed = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
         if removed.is_ok() {
             total -= size;
+            if let Some(day) = path.parent().filter(|day| *day != dir) {
+                let _ = std::fs::remove_dir(day); // only removes an empty folder
+            }
         }
     }
 }
@@ -395,10 +441,80 @@ mod tests {
     #[test]
     fn names_game_folders() {
         let mut t: SYSTEMTIME = unsafe { std::mem::zeroed() };
-        (t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond) = (2026, 11, 21, 21, 30, 5);
-        assert_eq!(game_folder_name(&t, "Jinx", "CLASSIC"), "2026-11-21_2130_Jinx_SR");
-        assert_eq!(game_folder_name(&t, "MissFortune", "ARAM"), "2026-11-21_2130_MissFortune_ARAM");
-        assert_eq!(game_folder_name(&t, "Jinx", ""), "2026-11-21_2130_Jinx_Unknown");
+        (t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond) = (2026, 11, 1, 9, 5, 5);
+        let day = Path::new("2026-11-01");
+        assert_eq!(game_folder(&t, "Jinx", "CLASSIC"), day.join("0905_Jinx_SR"));
+        assert_eq!(game_folder(&t, "MissFortune", "ARAM"), day.join("0905_MissFortune_ARAM"));
+        assert_eq!(game_folder(&t, "Jinx", ""), day.join("0905_Jinx_Unknown"));
+        // Only the game's part is cleaned: the day's separator stays a separator.
+        assert_eq!(game_folder(&t, "Jinx", "Odd/Mode"), day.join("0905_Jinx_Odd-Mode"));
+    }
+
+    #[test]
+    fn recognizes_old_game_folders() {
+        assert_eq!(old_game_folder("2026-11-21_2130_Jinx_SR"), Some(("2026-11-21", "2130_Jinx_SR")));
+        assert_eq!(old_game_folder("2026-11-21"), None); // a day folder
+        assert_eq!(old_game_folder("2026-11-21_holiday"), None);
+        assert_eq!(old_game_folder("2026-11-21_2130_"), None);
+        assert_eq!(old_game_folder("26-11-21_2130_Jinx_SR"), None);
+        assert_eq!(old_game_folder("2026-11-2ä_2130_Jinx"), None);
+    }
+
+    #[test]
+    fn moves_old_game_folders_into_days() {
+        let dir = std::env::temp_dir().join(format!("day_folders_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let put = |rel: &str| {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"x").unwrap();
+        };
+        put("2026-11-21_2130_Jinx_SR/12m40s_by-Ahri.mp4");
+        put("2026-11-21_2210_Lux_ARAM/01m00s_saved.mp4");
+        put("2026-11-22_0900_Jinx_SR/03m00s_by-Vi.mp4");
+        put("2026-11-22_1200_photos_trip/beach.jpg"); // not ours: has something besides clips
+        put("2026-11-23_1000_Ezreal_SR/05m00s_by-Vi.mp4"); // its new place is already taken
+        put("2026-11-23/1000_Ezreal_SR/01m00s_by-Lux.mp4");
+
+        move_into_day_folders(&dir);
+        for moved in ["2026-11-21/2130_Jinx_SR/12m40s_by-Ahri.mp4", "2026-11-21/2210_Lux_ARAM/01m00s_saved.mp4",
+            "2026-11-22/0900_Jinx_SR/03m00s_by-Vi.mp4"] {
+            assert!(dir.join(moved).exists(), "{moved}");
+        }
+        assert!(!dir.join("2026-11-21_2130_Jinx_SR").exists());
+        assert!(dir.join("2026-11-22_1200_photos_trip/beach.jpg").exists());
+        assert!(dir.join("2026-11-23_1000_Ezreal_SR/05m00s_by-Vi.mp4").exists());
+        assert!(dir.join("2026-11-23/1000_Ezreal_SR/01m00s_by-Lux.mp4").exists());
+        // Clips in both layouts are found (the leftover old folder too); the photo isn't a clip.
+        assert_eq!(clips(&dir).len(), 5);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn prune_deletes_a_day_with_its_last_game() {
+        let dir = std::env::temp_dir().join(format!("prune_days_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let now = SystemTime::now();
+        let make = |rel: &str, age: u64| {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let f = std::fs::File::create(&path).unwrap();
+            f.set_len(100).unwrap();
+            f.set_modified(now - Duration::from_secs(age)).unwrap();
+            path
+        };
+        make("2026-11-21/2130_Jinx_SR/a.mp4", 50);
+        make("2026-11-22/0900_Lux_SR/a.mp4", 40);
+        make("2026-11-22/1000_Lux_SR/a.mp4", 30);
+        let newest = make("2026-11-23/1000_Vi_SR/a.mp4", 10);
+
+        // 400 bytes, limit 250: the 21st's only game goes, and the day with it; then the 22nd's
+        // first game, leaving that day its second.
+        prune(&dir, 250, &newest);
+        assert!(!dir.join("2026-11-21").exists());
+        assert!(!dir.join("2026-11-22/0900_Lux_SR").exists());
+        assert!(dir.join("2026-11-22/1000_Lux_SR/a.mp4").exists() && newest.exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

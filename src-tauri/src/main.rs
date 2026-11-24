@@ -30,8 +30,8 @@ pub struct AppState {
     status_item: MenuItem<Wry>,
     replay_item: MenuItem<Wry>,
     pub last_clip: Mutex<Option<PathBuf>>,
-    /// While a game records: its recorder and clip folder name, for the save hotkey.
-    pub recording: Mutex<Option<(Arc<recorder::Recorder>, String)>>,
+    /// While a game records: its recorder and its clip folder (inside the clips folder), for the save hotkey.
+    pub recording: Mutex<Option<(Arc<recorder::Recorder>, PathBuf)>>,
     /// The save hotkey, registered only while a game records.
     pub save_key: Mutex<Option<win::Hotkey>>,
 }

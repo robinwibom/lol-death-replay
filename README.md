@@ -20,6 +20,8 @@ Start **LoLDeathReplay** from the Start menu (or turn on **Start with Windows** 
 - **Settings**
 - **Quit**
 
+Clips are kept in a folder per day, with a folder per game inside it, named by when the game started: for example `2026-11-24\1849_Caitlyn_SR\12m40s_by-Ahri.mp4`. Game folders from older versions, which sat directly in the clips folder, are moved into their day's folder the next time the app starts.
+
 ### The replay window
 
 It stays on top of the game and never takes your keyboard away from it. Move the mouse over it to show the controls:
