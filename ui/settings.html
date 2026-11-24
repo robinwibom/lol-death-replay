@@ -271,7 +271,7 @@
     <div class="row">
       <span class="label">Frame rate</span>
       <div class="seg" data-key="fps" role="radiogroup" aria-label="Frame rate">
-        <button data-value="30">30 fps</button><button data-value="60">60 fps</button>
+        <button data-value="24">24 fps</button><button data-value="30">30 fps</button><button data-value="60">60 fps</button><button data-value="120">120 fps</button>
       </div>
     </div>
     <div class="row">
@@ -389,6 +389,15 @@
       });
     }
   }
+  // Controls with as many options (Quality and Frame rate) take the widest one's width, so they
+  // line up. Their columns are equal, so each option widens alike. Before any selectSeg: the
+  // thumb is sized from the buttons.
+  const segWidths = new Map();
+  const options = (seg) => seg.querySelectorAll('button').length;
+  for (const seg of document.querySelectorAll('.seg')) {
+    segWidths.set(options(seg), Math.max(segWidths.get(options(seg)) ?? 0, seg.offsetWidth));
+  }
+  for (const seg of document.querySelectorAll('.seg')) seg.style.width = `${segWidths.get(options(seg))}px`;
 
   // ---- steppers ----
   // What the user typed, rounded to the step and kept in range. Empty or not a number: unchanged.
