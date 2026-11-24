@@ -233,7 +233,7 @@ impl Recorder {
             String::new()
         };
         // Room for the longest clip a death can ask for. It's memory (about 1.3 MB a second at
-        // 1080p30), so the full minute is only kept with Dynamic clip on.
+        // 1080p30), so the full minute is only kept with "Include the whole fight" on.
         let before = if s.dynamic_clip { s.before.max(MAX_BEFORE) } else { s.before };
         let keep = Duration::from_secs_f64(before + s.after + KEEP_MARGIN);
 

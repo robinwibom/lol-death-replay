@@ -37,7 +37,7 @@ Not every moment worth keeping is a death. During a game, press **Ctrl+Shift+S**
 
 ### Settings
 
-Whether to show the replay and whether to save clips (turn both off and it doesn't record at all), how many seconds to keep before and after a death, **Dynamic clip** (when you die in a fight, keep the whole fight, up to 60 seconds before the death), recording quality (720p to native, 30 or 60 fps), the clips folder and its size limit (oldest clips are deleted first). Recording changes, and turning **Dynamic clip** on, apply from the next game.
+Whether to show the replay and whether to save clips (turn both off and it doesn't record at all), how many seconds to keep before and after a death, **Include the whole fight** (when you die in a fight, the clip goes back to where the fight started, up to 60 seconds before the death), recording quality (720p to native, 30 or 60 fps), the clips folder and its size limit (oldest clips are deleted first). Recording changes, and turning on **Include the whole fight**, apply from the next game.
 
 ## Troubleshooting
 
@@ -50,7 +50,7 @@ Whether to show the replay and whether to save clips (turn both off and it doesn
 
 Deaths are detected with Riot's official [Live Client Data API](https://developer.riotgames.com/docs/lol#game-client-api), which the game serves on `https://127.0.0.1:2999` during a match. The app only reads that API and records your screen with ffmpeg, the same way OBS does. It never touches the game client.
 
-While a match runs, ffmpeg streams the recording into the app, which keeps only the last stretch of it in memory (about 30 MB at 1080p, or 90 MB with **Dynamic clip** on, which keeps a full minute). Nothing is written to disk until a clip is saved. On a death, the app waits 2 seconds, writes the last 17 seconds to an `.mp4` and opens it in the replay window. With **Dynamic clip** on, it first looks back through the game's kill events for the fight that ended in your death: earlier kills less than 10 seconds apart that share a player (killer, victim or assister) with the fight count as part of it. The clip then starts 5 seconds before the fight's first kill, up to 60 seconds before the death.
+While a match runs, ffmpeg streams the recording into the app, which keeps only the last stretch of it in memory (about 30 MB at 1080p, or 90 MB with **Include the whole fight** on, which keeps a full minute). Nothing is written to disk until a clip is saved. On a death, the app waits 2 seconds, writes the last 17 seconds to an `.mp4` and opens it in the replay window. With **Include the whole fight** on, it first looks back through the game's kill events for the fight that ended in your death: earlier kills less than 10 seconds apart that share a player (killer, victim or assister) with the fight count as part of it. The clip then starts 5 seconds before the fight's first kill, up to 60 seconds before the death.
 
 ## Building from source
 
