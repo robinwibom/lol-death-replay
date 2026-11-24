@@ -1,11 +1,15 @@
 // No console window in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod audio;
+mod audio_ring;
 mod live_client;
+mod mp4;
 mod player;
 mod recorder;
 mod settings;
 mod toast;
+mod ts;
 mod updater;
 mod watcher;
 mod win;

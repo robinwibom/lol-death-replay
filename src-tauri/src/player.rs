@@ -4,20 +4,34 @@ use std::path::Path;
 
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
-use crate::{settings, win};
+use crate::{mp4, settings, win};
 
 const LABEL: &str = "player";
+
+/// A yes or no as the page's query string carries it: "1" or "0" (ui/player.html reads them).
+fn yes_no(on: bool) -> &'static str {
+    if on {
+        "1"
+    } else {
+        "0"
+    }
+}
 
 pub fn show(app: &AppHandle, clip: &Path, title: &str, death_from_end: f64) {
     if let Err(e) = app.asset_protocol_scope().allow_file(clip) {
         crate::log(&format!("Couldn't allow the clip for playback: {e}"));
         return;
     }
+    // Without sound, the page greys out its speaker: the clip has none (the setting was off when it
+    // was recorded, or nothing was heard), and its tooltip says if the setting is off now.
+    let s = settings::current(app);
     let mut url = tauri::Url::parse("http://x/").unwrap();
     url.query_pairs_mut()
         .append_pair("clip", &clip.to_string_lossy())
         .append_pair("title", title)
-        .append_pair("death", &death_from_end.to_string());
+        .append_pair("death", &death_from_end.to_string())
+        .append_pair("sound", yes_no(mp4::has_sound(clip)))
+        .append_pair("recordSound", yes_no(s.record_sound));
     let query = url.query().unwrap_or_default().to_string();
 
     // Already open (died again while watching): load the new clip into it. Destroying it and
@@ -40,7 +54,6 @@ pub fn show(app: &AppHandle, clip: &Path, title: &str, death_from_end: f64) {
         }
     }
 
-    let s = settings::current(app);
     let page = format!("player.html?{query}");
 
     let built = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App(page.into()))

@@ -274,6 +274,10 @@
         <button data-value="30">30 fps</button><button data-value="60">60 fps</button>
       </div>
     </div>
+    <div class="row">
+      <label class="label" for="recordSound">Record game sound</label>
+      <span class="switch"><input type="checkbox" id="recordSound"><span></span></span>
+    </div>
   </div>
 
   <h2>Clips</h2>
@@ -475,6 +479,7 @@
     $('autoPlay').checked = settings.autoPlay;
     $('saveClips').checked = settings.saveClips;
     $('dynamicClip').checked = settings.dynamicClip;
+    $('recordSound').checked = settings.recordSound;
     $('clipsDir').textContent = settings.clipsDir;
     $('clipsDir').title = settings.clipsDir;
   }
@@ -502,6 +507,7 @@
   $('autoPlay').addEventListener('change', () => { settings.autoPlay = $('autoPlay').checked; saveSoon(); });
   $('saveClips').addEventListener('change', () => { settings.saveClips = $('saveClips').checked; saveSoon(); });
   $('dynamicClip').addEventListener('change', () => { settings.dynamicClip = $('dynamicClip').checked; saveSoon(); });
+  $('recordSound').addEventListener('change', () => { settings.recordSound = $('recordSound').checked; saveSoon(); });
   $('startWithWindows').addEventListener('change', saveSoon);
   $('open').addEventListener('click', () => invoke('open_clips_folder'));
   $('log').addEventListener('click', () => invoke('open_log'));

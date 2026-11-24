@@ -192,6 +192,26 @@
   #play .resume { display: none; }
   body.paused #play .pause { display: none; }
   body.paused #play .resume { display: block; }
+  /* Sound: the speaker mutes; hovering it slides out the volume. */
+  .sound { display: flex; align-items: center; }
+  #volume {
+    width: 0;
+    margin: 0;
+    opacity: 0;
+    transition: width 0.2s var(--ease), margin 0.2s var(--ease), opacity 0.15s ease;
+  }
+  .sound:hover #volume, #volume.active { width: 64px; margin: 0 8px 0 4px; opacity: 1; }
+  #mute .off { display: none; }
+  body.muted #mute .on { display: none; }
+  body.muted #mute .off { display: block; }
+  /* A clip without sound: the speaker shows "off", dimmed, and does nothing. Any dimmer and it
+     gets lost over a busy game frame. */
+  body.nosound #mute { opacity: 0.55; cursor: default; }
+  body.nosound #mute:hover { background: none; }
+  body.nosound #mute:active { transform: none; }
+  body.nosound #mute .on { display: none; }
+  body.nosound #mute .off { display: block; }
+  body.nosound #volume { display: none; }
   .speed { position: relative; }
   #speed-label { display: none; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
   #speed.changed svg { display: none; }
@@ -239,7 +259,7 @@
 </style>
 </head>
 <body class="paused">
-  <video id="video" muted preload="auto"></video>
+  <video id="video" preload="auto"></video>
   <div id="surface"></div>
 
   <div class="shade top"></div>
@@ -279,6 +299,16 @@
     </div>
 
     <div class="group right">
+      <div class="sound">
+        <div id="volume" class="slider ctl" title="Volume">
+          <div class="track"><div class="fill"></div></div>
+          <div class="thumb"></div>
+        </div>
+        <button id="mute" class="icon ctl" title="Sound on / off" aria-label="Sound on or off">
+          <svg class="on" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5h3.2L12 5.5v13l-4.8-4H4z" fill="currentColor"/><path d="M15.5 9a4 4 0 0 1 0 6"/><path d="M18 6.5a7.5 7.5 0 0 1 0 11"/></svg>
+          <svg class="off" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5h3.2L12 5.5v13l-4.8-4H4z" fill="currentColor"/><path d="M16 9.5l5 5M21 9.5l-5 5"/></svg>
+        </button>
+      </div>
       <div class="speed">
         <button id="speed" class="icon ctl" title="Playback speed" aria-label="Playback speed" aria-haspopup="menu">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.6 18.5a9 9 0 1 1 14.8 0"/><path d="M12 14l4.2-4.2"/><circle cx="12" cy="14" r="1.2" fill="currentColor"/></svg>
@@ -341,8 +371,12 @@
   // Plays once from START_LEAD before the death and stops on the last frame; pressing play again
   // starts over from the clip's beginning (togglePlay).
   // Always starts at 1×; the speed menu changes it while watching.
-  // Muted (clips have no sound anyway), so autoplay is always allowed.
-  video.play();
+  // With sound at the volume last chosen. If the WebView won't start sound without a click, it
+  // starts muted instead, and the speaker button turns the sound on.
+  const sound = JSON.parse(localStorage.getItem('sound') || '{}');
+  video.volume = clamp(sound.volume ?? 1, 0, 1);
+  video.muted = !!sound.muted;
+  video.play().catch(() => { video.muted = true; video.play(); });
 
   video.addEventListener('play', () => body.classList.remove('paused'));
   video.addEventListener('pause', () => body.classList.add('paused'));
@@ -427,6 +461,39 @@
     start: () => { resumeAfterScrub = !video.paused; video.pause(); },
     move: (f) => seek(f * (video.duration || 0)),
     end: () => { if (resumeAfterScrub) video.play(); },
+  });
+
+  // ---- sound ----
+  // Remembered for the next replay. Only what you choose is: not the muting autoplay may need.
+  const keepSound = () => localStorage.setItem('sound', JSON.stringify({ volume: video.volume, muted: video.muted }));
+  function syncSound() {
+    const off = video.muted || video.volume === 0;
+    body.classList.toggle('muted', off);
+    setFrac($('volume'), off ? 0 : video.volume);
+  }
+  video.addEventListener('volumechange', syncSound);
+  syncSound();
+  // No sound track in the clip (missing from older links too: treat those as having sound).
+  if (params.get('sound') === '0') {
+    body.classList.add('nosound');
+    $('mute').setAttribute('aria-disabled', 'true');
+    $('mute').title = params.get('recordSound') === '0'
+      ? 'No sound: Record game sound is off in settings'
+      : 'This clip has no sound';
+  }
+  $('mute').addEventListener('click', () => {
+    if (body.classList.contains('nosound')) return;
+    if (video.muted || video.volume === 0) {
+      video.muted = false;
+      if (video.volume === 0) video.volume = 1;
+    } else {
+      video.muted = true;
+    }
+    keepSound();
+  });
+  slider($('volume'), {
+    move: (f) => { video.volume = f; video.muted = f === 0; },
+    end: keepSound,
   });
 
   // ---- speed ----

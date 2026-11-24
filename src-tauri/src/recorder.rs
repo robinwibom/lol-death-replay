@@ -1,5 +1,6 @@
 //! Rolling screen recording: ffmpeg streams MPEG-TS into this process, which keeps the last stretch
-//! of it in memory. Nothing touches the disk until a clip is saved.
+//! of it in memory. Nothing touches the disk until a clip is saved. The game's sound is kept beside
+//! it (audio.rs) and joined to the video only in saved clips.
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -7,6 +8,7 @@ use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -15,7 +17,10 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 
+use crate::audio;
+use crate::audio_ring;
 use crate::settings::Settings;
+use crate::ts::{self, TS_HZ, TS_PACKET, VIDEO_PID};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Extra seconds kept beyond the longest clip, so there's always a keyframe (one a second) to start at.
@@ -76,11 +81,18 @@ fn tie_to_app(child: &Child) {
     }
 }
 
-/// Deletes the segment folders that older versions, which buffered on disk, could leave in the temp folder.
+/// Deletes what an earlier run could leave in the temp folder: segment folders from older versions,
+/// which buffered on disk, and the sound of a clip being saved when the app was killed.
+///
+/// Safe to do unconditionally: the app is single-instance (a second launch only focuses the first),
+/// so no other copy can be recording or saving a clip whose files these are.
 pub fn remove_stale_segments() {
     let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
     for entry in entries.filter_map(|e| e.ok()) {
-        if entry.file_name().to_string_lossy().starts_with("lol_replay_") && entry.path().is_dir() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(SOUND_FILE) {
+            let _ = std::fs::remove_file(entry.path());
+        } else if name.starts_with("lol_replay_") && entry.path().is_dir() {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
@@ -122,15 +134,21 @@ pub fn next_capture(capture: &str) -> Option<&'static str> {
 
 // ---- The in-memory buffer ----
 
-const TS_PACKET: usize = 188;
-
 /// A stretch of the stream from one PAT (the table a reader needs before anything else, which
 /// ffmpeg sends about every 0.1s and right before each keyframe) up to the next one.
 struct Chunk {
     at: Instant,
     /// Holds the start of a keyframe, so a clip can start with this chunk.
     key: bool,
+    /// The timestamp of the first frame that starts in this chunk, and when it arrived here.
+    frame: Option<(u64, Instant)>,
     bytes: Vec<u8>,
+}
+
+/// What a clip is cut from: the stream, and when its first frame was captured if that's known.
+struct Cut {
+    stream: Vec<u8>,
+    first_frame_at: Option<Instant>,
 }
 
 /// The last `keep` of the MPEG-TS stream, cut into chunks that start where a reader can join in.
@@ -151,14 +169,19 @@ impl Ring {
         self.partial.extend_from_slice(data);
         let whole = self.partial.len() / TS_PACKET * TS_PACKET;
         for packet in self.partial[..whole].as_chunks::<TS_PACKET>().0 {
-            let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
+            let pid = ts::pid(packet);
             if pid == 0 || self.chunks.is_empty() {
-                self.chunks.push_back(Chunk { at: now, key: false, bytes: Vec::new() });
+                self.chunks.push_back(Chunk { at: now, key: false, frame: None, bytes: Vec::new() });
             }
             let chunk = self.chunks.back_mut().unwrap();
-            // An adaptation field with the random access indicator set: how ffmpeg marks keyframes.
-            if packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x40 != 0 {
-                chunk.key = true;
+            if pid == VIDEO_PID {
+                // An adaptation field with the random access indicator set: how ffmpeg marks keyframes.
+                if packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x40 != 0 {
+                    chunk.key = true;
+                }
+                if chunk.frame.is_none() {
+                    chunk.frame = ts::frame_pts(packet).map(|pts| (pts, now));
+                }
             }
             chunk.bytes.extend_from_slice(packet);
         }
@@ -168,9 +191,24 @@ impl Ring {
         }
     }
 
+    /// When the frame with timestamp 0 was captured, and so when any frame was: its timestamp later.
+    ///
+    /// Frames are stamped from the capture's first frame, a moment ffmpeg doesn't report, but each
+    /// arrives here a little after it was captured (converting, encoding, the pipe). So of all the
+    /// frames kept, the one that came through fastest gives the closest answer: arrival minus
+    /// timestamp is smallest for it. That's within a few milliseconds of the real capture time,
+    /// and as the oldest frames are forgotten the answer follows any slow drift between clocks.
+    fn capture_origin(&self) -> Option<Instant> {
+        self.chunks
+            .iter()
+            .filter_map(|c| c.frame)
+            .filter_map(|(pts, at)| at.checked_sub(Duration::from_secs_f64(pts as f64 / TS_HZ)))
+            .min()
+    }
+
     /// The stream from the last keyframe at least `seconds` before `now` (or the oldest one kept)
     /// to the end. Starting a little early is fine; starting after a keyframe wouldn't decode.
-    fn since_keyframe_before(&self, seconds: f64, now: Instant) -> Vec<u8> {
+    fn since_keyframe_before(&self, seconds: f64, now: Instant) -> Cut {
         let from = now.checked_sub(Duration::from_secs_f64(seconds)).unwrap_or(now);
         let start = self
             .chunks
@@ -178,7 +216,15 @@ impl Ring {
             .rposition(|c| c.key && c.at <= from)
             .or_else(|| self.chunks.iter().position(|c| c.key))
             .unwrap_or(self.chunks.len());
-        self.chunks.range(start..).flat_map(|c| c.bytes.iter().copied()).collect()
+        let first_pts = self.chunks.range(start..).find_map(|c| c.frame).map(|(pts, _)| pts);
+        let first_frame_at = self
+            .capture_origin()
+            .zip(first_pts)
+            .map(|(origin, pts)| origin + Duration::from_secs_f64(pts as f64 / TS_HZ));
+        Cut {
+            stream: self.chunks.range(start..).flat_map(|c| c.bytes.iter().copied()).collect(),
+            first_frame_at,
+        }
     }
 }
 
@@ -208,6 +254,8 @@ pub struct Recorder {
     child: Mutex<Option<Child>>,
     ring: Arc<Mutex<Ring>>,
     errors: Arc<Mutex<Vec<u8>>>,
+    /// The game's sound, unless it's turned off.
+    sound: Option<audio::Capture>,
 }
 
 impl Recorder {
@@ -268,14 +316,22 @@ impl Recorder {
         let stderr = child.stderr.take().unwrap();
         let to_errors = errors.clone();
         std::thread::spawn(move || keep_tail(stderr, to_errors, 1500));
+        let sound = s.record_sound.then(|| audio::Capture::start(crate::win::league_process(), keep));
 
         crate::log(&format!(
-            "Recording started ({capture}, {encoder}, {} fps, {}p, keeping the last {:.0}s in memory)",
+            "Recording started ({capture}, {encoder}, {} fps, {}p, {}, keeping the last {:.0}s in memory)",
             s.fps,
             s.height,
+            if sound.is_some() { "with sound" } else { "no sound" },
             keep.as_secs_f64()
         ));
-        Ok(Self { ffmpeg: ffmpeg_exe.to_path_buf(), capture, child: Mutex::new(Some(child)), ring, errors })
+        Ok(Self { ffmpeg: ffmpeg_exe.to_path_buf(), capture, child: Mutex::new(Some(child)), ring, errors, sound })
+    }
+
+    /// Whether the sound being recorded is all the speakers' sound, not just the game's (voice chat
+    /// may be in it). False when there's no sound.
+    pub fn all_sound(&self) -> bool {
+        self.sound.as_ref().is_some_and(|s| s.all_sound())
     }
 
     pub fn alive(&self) -> bool {
@@ -308,19 +364,59 @@ impl Recorder {
 
     /// Saves about the last `seconds` as an .mp4, from the keyframe just before (so up to a second more).
     pub fn save_last(&self, seconds: f64, out: &Path) -> Result<(), String> {
-        let stream = self.ring.lock().unwrap().since_keyframe_before(seconds, Instant::now());
-        save_stream(&self.ffmpeg, stream, out)
+        let cut = self.ring.lock().unwrap().since_keyframe_before(seconds, Instant::now());
+        let sound = match (&self.sound, cut.first_frame_at) {
+            (Some(sound), Some(starts)) => Some(sound.since(starts)),
+            (Some(_), None) => {
+                crate::log("Couldn't tell when the clip starts - saving it without sound");
+                None
+            }
+            (None, _) => None,
+        };
+        // Empty when nothing was heard yet: no sound track rather than a silent one.
+        save_stream(&self.ffmpeg, cut.stream, sound.filter(|s| !s.is_empty()).as_deref(), out)
     }
 }
 
-/// Turns MPEG-TS bytes into an .mp4 without re-encoding.
-fn save_stream(ffmpeg_exe: &Path, stream: Vec<u8>, out: &Path) -> Result<(), String> {
+/// How the files holding a clip's sound while it's saved are named, in the temp folder.
+const SOUND_FILE: &str = "lol_replay_sound_";
+
+/// A file deleted when this is dropped.
+struct TempFile(PathBuf);
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Writes `sound` where ffmpeg can read it as raw PCM. A file rather than a second pipe, since the
+/// video already comes in on ffmpeg's stdin and feeding two pipes would need another thread.
+fn sound_file(sound: &[i16]) -> Result<TempFile, String> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let file = TempFile(std::env::temp_dir().join(format!("{SOUND_FILE}{}_{n}.pcm", std::process::id())));
+    let bytes: Vec<u8> = sound.iter().flat_map(|s| s.to_le_bytes()).collect();
+    std::fs::write(&file.0, bytes).map_err(|e| format!("couldn't write the clip's sound: {e}"))?;
+    Ok(file)
+}
+
+/// Turns MPEG-TS bytes into an .mp4 without re-encoding the video, adding `sound` (heard from the
+/// video's first frame on) as AAC.
+fn save_stream(ffmpeg_exe: &Path, stream: Vec<u8>, sound: Option<&[i16]>, out: &Path) -> Result<(), String> {
     if stream.is_empty() {
         return Err("no recording yet".into());
     }
-    let mut child = ffmpeg(ffmpeg_exe)
-        .args(["-loglevel", "error", "-y", "-f", "mpegts", "-i", "pipe:0"])
-        .args(["-c", "copy", "-movflags", "+faststart"])
+    let sound = sound.map(sound_file).transpose()?;
+    let mut cmd = ffmpeg(ffmpeg_exe);
+    cmd.args(["-loglevel", "error", "-y", "-f", "mpegts", "-i", "pipe:0"]);
+    if let Some(file) = &sound {
+        let (rate, channels) = (audio_ring::RATE.to_string(), audio_ring::CHANNELS.to_string());
+        cmd.args(["-f", "s16le", "-ar", &rate, "-ac", &channels, "-i"]).arg(&file.0);
+        // Each input's timestamps start from 0, so the sound's first sample meets the first frame.
+        cmd.args(["-map", "0:v", "-map", "1:a", "-c:a", "aac", "-b:a", "128k"]);
+    }
+    let mut child = cmd
+        .args(["-c:v", "copy", "-movflags", "+faststart"])
         .arg(out)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -356,27 +452,7 @@ mod tests {
         assert_eq!(next_capture("gdigrab"), None);
     }
 
-    #[derive(PartialEq)]
-    enum Kind {
-        /// The PAT (pid 0).
-        Pat,
-        /// The start of a keyframe: video with the random access indicator set.
-        Key,
-        /// Any other video.
-        Video,
-    }
-    use Kind::*;
-
-    fn packet(kind: Kind) -> Vec<u8> {
-        let mut p = vec![0xffu8; TS_PACKET];
-        p[0] = 0x47;
-        let pid: u16 = if kind == Pat { 0 } else { 256 };
-        (p[1], p[2], p[3]) = ((pid >> 8) as u8, pid as u8, 0x10);
-        if kind == Key {
-            (p[3], p[4], p[5]) = (0x30, 1, 0x40);
-        }
-        p
-    }
+    use crate::ts::test_support::{packet, with_pts, Kind::*};
 
     #[test]
     fn ring_keeps_recent_chunks_starting_at_keyframes() {
@@ -394,13 +470,32 @@ mod tests {
 
         // The last 2s from 9.5: the keyframe at 7.0 is the last one at or before 7.5, so the chunks
         // from 7, 7.5, 8, 8.5, 9 and 9.5: three of 3 packets and three of 2.
-        let last = ring.since_keyframe_before(2.0, at(9.5));
+        let last = ring.since_keyframe_before(2.0, at(9.5)).stream;
         assert_eq!(last.len(), 15 * TS_PACKET);
         assert_eq!(&last[..TS_PACKET], &packet(Pat)[..]); // starts at the PAT before the keyframe
         assert_eq!(&last[TS_PACKET..2 * TS_PACKET], &packet(Key)[..]);
 
         // More than is kept: from the oldest keyframe (5.0), skipping 4.5 which has none.
-        assert_eq!(ring.since_keyframe_before(60.0, at(9.5)).len(), 5 * 5 * TS_PACKET); // 5 seconds of 5 packets
+        assert_eq!(ring.since_keyframe_before(60.0, at(9.5)).stream.len(),5 * 5 * TS_PACKET); // 5 seconds of 5 packets
+    }
+
+    #[test]
+    fn works_out_when_frames_were_captured() {
+        let t0 = Instant::now();
+        let at = |s: f64| t0 + Duration::from_secs_f64(s);
+        let mut ring = Ring::new(Duration::from_secs(5));
+        // Frames 1/30 s apart, from a capture that started at t0 + 5 ms, arriving 25, 5 and 20 ms late.
+        ring.push(&[packet(Pat), with_pts(packet(Key), 90_000)].concat(), at(1.030));
+        ring.push(&[packet(Pat), with_pts(packet(Video), 93_000)].concat(), at(1.005 + 1.0 / 30.0 + 0.005));
+        ring.push(&[packet(Pat), with_pts(packet(Key), 96_000)].concat(), at(1.005 + 2.0 / 30.0 + 0.020));
+        // The fastest frame says the capture started at 5 + 5 = 10 ms: off by its 5 ms of latency.
+        let origin = ring.capture_origin().unwrap();
+        assert!((origin.duration_since(t0).as_secs_f64() - 0.010).abs() < 1e-6);
+        // A clip from the last keyframe starts at its timestamp after that.
+        let cut = ring.since_keyframe_before(0.0, at(1.1));
+        assert_eq!(cut.stream.len(), 2 * TS_PACKET);
+        let starts = cut.first_frame_at.unwrap().duration_since(t0).as_secs_f64();
+        assert!((starts - (0.010 + 96_000.0 / TS_HZ)).abs() < 1e-6, "{starts}");
     }
 
     #[test]
@@ -411,7 +506,7 @@ mod tests {
         ring.push(&data[..100], now);
         ring.push(&data[100..300], now);
         ring.push(&data[300..], now);
-        assert_eq!(ring.since_keyframe_before(0.0, now), data);
+        assert_eq!(ring.since_keyframe_before(0.0, now).stream, data);
     }
 
     /// Records a few seconds through the real ffmpeg, the way a game is, and saves the end of it.
@@ -433,7 +528,7 @@ mod tests {
         let ring = ring.into_inner().unwrap();
 
         let out = std::env::temp_dir().join(format!("ring_test_{}.mp4", std::process::id()));
-        save_stream(&exe, ring.since_keyframe_before(2.0, Instant::now()), &out).unwrap();
+        save_stream(&exe, ring.since_keyframe_before(2.0, Instant::now()).stream, None, &out).unwrap();
         // ffmpeg reads it back without errors; its length is 2s plus up to a second to the keyframe.
         let probe = ffmpeg(&exe)
             .args(["-v", "error", "-i"])
@@ -446,8 +541,20 @@ mod tests {
             &ffmpeg(&exe).args(["-i"]).arg(&out).args(["-c", "copy", "-f", "null", "-"]).output().unwrap().stderr,
         )
         .to_string();
+        assert!(!crate::mp4::has_sound(&out));
         std::fs::remove_file(&out).unwrap();
         let count: u32 = frames.rsplit("frame=").next().unwrap().split_whitespace().next().unwrap().parse().unwrap();
         assert!((60..=95).contains(&count), "{count} frames");
+
+        // The same with 3 seconds of a tone beside it: an AAC track in the .mp4.
+        let tone: Vec<i16> = (0..audio_ring::RATE as usize * 3)
+            .flat_map(|i| [(3000.0 * (i as f64 * 440.0 * std::f64::consts::TAU / 48_000.0).sin()) as i16; 2])
+            .collect();
+        save_stream(&exe, ring.since_keyframe_before(2.0, Instant::now()).stream, Some(&tone), &out).unwrap();
+        let info = ffmpeg(&exe).arg("-i").arg(&out).output().unwrap();
+        assert!(crate::mp4::has_sound(&out));
+        std::fs::remove_file(&out).unwrap();
+        let info = String::from_utf8_lossy(&info.stderr);
+        assert!(info.contains("Audio: aac") && info.contains("48000 Hz, stereo"), "{info}");
     }
 }

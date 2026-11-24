@@ -32,6 +32,18 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# Game audio capture (WASAPI is COM, which windows-sys doesn't cover). The same version Tauri's
+# WebView2 bindings already build, so this only adds features.
+windows = { version = "0.62", features = [
+    "Win32_Media_Audio",
+    "Win32_Security", # CreateEventW
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Performance",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+] }
+windows-core = "0.62" # what #[implement] expands to
 
 # Dependencies without debug info: faster dev builds and links. This crate keeps it.
 [profile.dev.package."*"]

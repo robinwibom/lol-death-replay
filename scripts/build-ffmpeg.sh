@@ -99,6 +99,10 @@ cd ffmpeg
     `# saving a clip: concat the segments, copy into .mp4` \
     --enable-protocol=file,pipe,concat --enable-demuxer=mpegts --enable-muxer=mp4 \
     --enable-decoder=h264 --enable-parser=h264 --enable-bsf=extract_extradata,h264_mp4toannexb \
+    `# a clip's sound: raw PCM from the app (audio.rs), converted and encoded to AAC.` \
+    `# configure's name for "-f s16le" is pcm_s16le, and it ignores names it doesn't know` \
+    --enable-demuxer=pcm_s16le --enable-decoder=pcm_s16le --enable-encoder=aac \
+    --enable-filter=anull,aformat,aresample \
     `# reading an .mp4 back: the app doesn't (the WebView plays clips), test-ffmpeg.ps1 does` \
     --enable-demuxer=mov
 # configure leaves out a filter whose requirements fail without saying so. Stop here with the

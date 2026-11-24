@@ -23,6 +23,7 @@ pub fn run(app: AppHandle) {
     let mut names = HashSet::new();
     let mut game_folder: Option<String> = None; // where this game's clips go, decided once per game
     let mut was_dead = false;
+    let mut shown_all_sound = false; // whether the status currently says the sound is all sound
     let mut failed = false; // don't retry recording until the next game
     let mut idle = false; // in a game, but replay and clips are both turned off
     let mut fallback: Option<&str> = None; // a capture method failed this game, so record with this one instead
@@ -74,9 +75,10 @@ pub fn run(app: AppHandle) {
                 Ok(r) => {
                     let r = Arc::new(r);
                     set_recording(&app, Some((r.clone(), game_folder.clone().unwrap_or_default())));
+                    shown_all_sound = r.all_sound();
+                    set_status(&app, recording_status(shown_all_sound));
                     rec = Some(r);
                     was_dead = false;
-                    set_status(&app, "Recording this game");
                 }
                 Err(e) => {
                     crate::log(&format!("Couldn't start recording: {e}"));
@@ -88,6 +90,11 @@ pub fn run(app: AppHandle) {
         }
 
         let r = rec.as_ref().unwrap();
+        // The sound can switch from all sound to the game's alone once the game's process appears.
+        if r.all_sound() != shown_all_sound {
+            shown_all_sound = r.all_sound();
+            set_status(&app, recording_status(shown_all_sound));
+        }
         if !r.alive() {
             crate::log(&format!("ffmpeg stopped unexpectedly:\n{}", r.error_tail()));
             set_recording(&app, None);
@@ -114,6 +121,16 @@ pub fn run(app: AppHandle) {
         }
         was_dead = dead;
         thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// The status while recording. It starts with "Recording this" (the settings window keys off that),
+/// and says when the sound is all sound, since voice chat may be in it.
+fn recording_status(all_sound: bool) -> &'static str {
+    if all_sound {
+        "Recording this game (all sound: voice chat may be included)"
+    } else {
+        "Recording this game"
     }
 }
 

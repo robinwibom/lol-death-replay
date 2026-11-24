@@ -26,7 +26,7 @@ It stays on top of the game and never takes your keyboard away from it. Move the
 
 - **Drag the video** to move the window, and drag any **edge or corner** to resize it. It opens in the same place next time. Click the video to pause or play.
 - **Timeline**: playback starts 5 seconds before the death; drag back to see the rest of the clip. The gold **DEATH** section at the end is the interesting part: from about 3 seconds before you died to the end of the clip.
-- **Bottom row**: back 5s, play/pause and forward 5s; playback speed (0.25× to 2×) on the right. Clips have no sound.
+- **Bottom row**: back 5s, play/pause and forward 5s; on the right, sound (click the speaker to mute, hover it for the volume, both remembered; it's greyed out when the clip has no sound, e.g. with **Record game sound** off) and playback speed (0.25× to 2×).
 - **X** (top right) closes it. **Ctrl+Shift+X** also closes it from inside the game.
 
 It closes by itself the next time you die (replaced by the new replay) and when the game ends.
@@ -37,7 +37,7 @@ Not every moment worth keeping is a death. During a game, press **Ctrl+Shift+S**
 
 ### Settings
 
-Whether to show the replay and whether to save clips (turn both off and it doesn't record at all), how many seconds to keep before and after a death, **Include the whole fight** (when you die in a fight, the clip goes back to where the fight started, up to 60 seconds before the death), recording quality (720p to native, 30 or 60 fps), the clips folder and its size limit (oldest clips are deleted first). Recording changes, and turning on **Include the whole fight**, apply from the next game.
+Whether to show the replay and whether to save clips (turn both off and it doesn't record at all), how many seconds to keep before and after a death, **Include the whole fight** (when you die in a fight, the clip goes back to where the fight started, up to 60 seconds before the death), recording quality (720p to native, 30 or 60 fps), **Record game sound** (only the game's own sound: voice chat, music and other apps stay out of clips), the clips folder and its size limit (oldest clips are deleted first). Recording changes (sound included), and turning on **Include the whole fight**, apply from the next game.
 
 ## Troubleshooting
 
@@ -50,7 +50,9 @@ Whether to show the replay and whether to save clips (turn both off and it doesn
 
 Deaths are detected with Riot's official [Live Client Data API](https://developer.riotgames.com/docs/lol#game-client-api), which the game serves on `https://127.0.0.1:2999` during a match. The app only reads that API and records your screen with ffmpeg, the same way OBS does. It never touches the game client.
 
-While a match runs, ffmpeg streams the recording into the app, which keeps only the last stretch of it in memory (about 30 MB at 1080p, or 90 MB with **Include the whole fight** on, which keeps a full minute). Nothing is written to disk until a clip is saved. On a death, the app waits 2 seconds, writes the last 17 seconds to an `.mp4` and opens it in the replay window. With **Include the whole fight** on, it first looks back through the game's kill events for the fight that ended in your death: earlier kills less than 10 seconds apart that share a player (killer, victim or assister) with the fight count as part of it. The clip then starts 5 seconds before the fight's first kill, up to 60 seconds before the death.
+While a match runs, ffmpeg streams the recording into the app, which keeps only the last stretch of it in memory (about 30 MB at 1080p, or 90 MB with **Include the whole fight** on, which keeps a full minute, plus 4 or 12 MB of sound). Nothing is written to disk until a clip is saved.
+
+Sound is recorded by the app itself, with Windows' per-process loopback (Windows 10 2004 or newer): only what the game plays, the same audio Windows sends to your speakers. Where that isn't available, it records everything the speakers play instead, and the status says so (voice chat may be included). The app keeps looking for the game's process for up to two minutes, in case it starts after the game is reported. The sound is kept beside the video and only joined to it when a clip is saved: the app notes when each bit of sound was heard and works out when each video frame was captured, so they line up to within about 20 milliseconds. Clips carry it as AAC at 128 kbps, about 1 MB a minute. On a death, the app waits 2 seconds, writes the last 17 seconds to an `.mp4` and opens it in the replay window. With **Include the whole fight** on, it first looks back through the game's kill events for the fight that ended in your death: earlier kills less than 10 seconds apart that share a player (killer, victim or assister) with the fight count as part of it. The clip then starts 5 seconds before the fight's first kill, up to 60 seconds before the death.
 
 ## Building from source
 
@@ -64,7 +66,7 @@ Releases are built by GitHub Actions: push a tag like `v0.1.0` and `.github/work
 
 Layout:
 
-- `src-tauri/src/`: the Rust app. `watcher.rs` is the main loop, `recorder.rs` drives ffmpeg, `live_client.rs` talks to the game, `player.rs` opens the replay window, `settings.rs` stores settings, `win.rs` holds small Windows helpers (start with Windows, the hotkey, local time).
+- `src-tauri/src/`: the Rust app. `watcher.rs` is the main loop, `recorder.rs` drives ffmpeg, `audio.rs` records the game's sound, `live_client.rs` talks to the game, `player.rs` opens the replay window, `settings.rs` stores settings, `win.rs` holds small Windows helpers (start with Windows, the hotkey, local time).
 - `ui/`: `player.html` (replay window) and `settings.html`.
 
 ## License

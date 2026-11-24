@@ -21,7 +21,7 @@ use windows_sys::Win32::UI::Input::{
     RID_INPUT, RIM_TYPEKEYBOARD,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetMessageW, RegisterClassW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetMessageW, GetWindowThreadProcessId, RegisterClassW,
     SetWindowDisplayAffinity, MSG, RI_KEY_BREAK, RI_KEY_E0, WDA_EXCLUDEFROMCAPTURE, WM_INPUT, WNDCLASSW,
 };
 
@@ -279,6 +279,14 @@ pub fn exclude_from_capture(hwnd: *mut c_void) {
 pub fn league_window() -> Option<usize> {
     let hwnd = unsafe { FindWindowW(null(), wide("League of Legends (TM) Client").as_ptr()) };
     (!hwnd.is_null()).then_some(hwnd as usize)
+}
+
+/// The game's process id, found by its window.
+pub fn league_process() -> Option<u32> {
+    let hwnd = league_window()?;
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(hwnd as _, &mut pid) };
+    (pid != 0).then_some(pid)
 }
 
 // ---- Local time ----

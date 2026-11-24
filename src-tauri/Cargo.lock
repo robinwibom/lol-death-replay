@@ -2115,6 +2115,8 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "ureq",
+ "windows",
+ "windows-core",
  "windows-sys 0.61.2",
 ]
 
