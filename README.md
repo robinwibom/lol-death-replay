@@ -26,7 +26,7 @@ It stays on top of the game and never takes your keyboard away from it. Move the
 
 - **Drag the video** to move the window, and drag any **edge or corner** to resize it. It opens in the same place next time. Click the video to pause or play.
 - **Timeline**: playback starts 5 seconds before the death; drag back to see the rest of the clip. The gold **DEATH** section at the end is the interesting part: from about 3 seconds before you died to the end of the clip.
-- **Bottom row**: back 5s, play/pause and forward 5s; on the right, sound (click the speaker to mute, hover it for the volume, both remembered) and playback speed (0.25× to 2×).
+- **Bottom row**: back 5s, play/pause and forward 5s; on the right, sound (click the speaker to mute, hover it for the volume, both remembered; it's greyed out when the clip has no sound, e.g. with **Record game sound** off) and playback speed (0.25× to 2×).
 - **X** (top right) closes it. **Ctrl+Shift+X** also closes it from inside the game.
 
 It closes by itself the next time you die (replaced by the new replay) and when the game ends.

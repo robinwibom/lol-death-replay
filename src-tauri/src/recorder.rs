@@ -598,6 +598,7 @@ mod tests {
             &ffmpeg(&exe).args(["-i"]).arg(&out).args(["-c", "copy", "-f", "null", "-"]).output().unwrap().stderr,
         )
         .to_string();
+        assert!(!crate::player::has_sound(&out));
         std::fs::remove_file(&out).unwrap();
         let count: u32 = frames.rsplit("frame=").next().unwrap().split_whitespace().next().unwrap().parse().unwrap();
         assert!((60..=95).contains(&count), "{count} frames");
@@ -608,6 +609,7 @@ mod tests {
             .collect();
         save_stream(&exe, ring.since_keyframe_before(2.0, Instant::now()).stream, Some(&tone), &out).unwrap();
         let info = ffmpeg(&exe).arg("-i").arg(&out).output().unwrap();
+        assert!(crate::player::has_sound(&out));
         std::fs::remove_file(&out).unwrap();
         let info = String::from_utf8_lossy(&info.stderr);
         assert!(info.contains("Audio: aac") && info.contains("48000 Hz, stereo"), "{info}");

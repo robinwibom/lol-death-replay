@@ -204,6 +204,13 @@
   #mute .off { display: none; }
   body.muted #mute .on { display: none; }
   body.muted #mute .off { display: block; }
+  /* A clip without sound: the speaker shows "off", dimmed, and does nothing. */
+  body.nosound #mute { opacity: 0.35; cursor: default; }
+  body.nosound #mute:hover { background: none; }
+  body.nosound #mute:active { transform: none; }
+  body.nosound #mute .on { display: none; }
+  body.nosound #mute .off { display: block; }
+  body.nosound #volume { display: none; }
   .speed { position: relative; }
   #speed-label { display: none; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
   #speed.changed svg { display: none; }
@@ -465,7 +472,16 @@
   }
   video.addEventListener('volumechange', syncSound);
   syncSound();
+  // No sound track in the clip (missing from older links too: treat those as having sound).
+  if (params.get('sound') === '0') {
+    body.classList.add('nosound');
+    $('mute').setAttribute('aria-disabled', 'true');
+    $('mute').title = params.get('recordSound') === '0'
+      ? 'No sound: Record game sound is off in settings'
+      : 'This clip has no sound';
+  }
   $('mute').addEventListener('click', () => {
+    if (body.classList.contains('nosound')) return;
     if (video.muted || video.volume === 0) {
       video.muted = false;
       if (video.volume === 0) video.volume = 1;
