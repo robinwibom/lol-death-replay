@@ -10,8 +10,9 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager};
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 
-use crate::live_client::{champion, find_killer, find_player, is_dead, my_names, LiveClient};
+use crate::live_client::{champion, fight_length, find_killer, find_player, is_dead, my_names, LiveClient};
 use crate::recorder::{ffmpeg_path, next_capture, pick_encoder, remove_stale_segments, Recorder};
+use crate::settings::MAX_BEFORE;
 use crate::{player, set_status, settings, toast, win, AppState};
 
 pub fn run(app: AppHandle) {
@@ -150,7 +151,12 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
         return;
     }
     let client = LiveClient::new();
-    let killer = find_killer(client.get("eventdata").as_ref(), client.get("playerlist").as_ref(), &names);
+    let events = client.get("eventdata");
+    let killer = find_killer(events.as_ref(), client.get("playerlist").as_ref(), &names);
+    let before = if s.dynamic_clip { clip_before(fight_length(events.as_ref(), &names), s.before) } else { s.before };
+    if before > s.before {
+        crate::log(&format!("Died in a fight - keeping {before:.0}s before the death"));
+    }
     let game_time = game_time(&client);
     let (min, sec) = (game_time / 60, game_time % 60);
     let name = format!("{}_by-{}.mp4", clip_time(game_time), safe(&killer.file));
@@ -162,7 +168,7 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
         return;
     }
     let out = dir.join(name);
-    match rec.save_last(s.before + s.after, &out) {
+    match rec.save_last(before + s.after, &out) {
         Ok(()) => {
             crate::log(&format!("Saved {} (killed by {killer})", out.display()));
             *app.state::<AppState>().last_clip.lock().unwrap() = Some(out.clone());
@@ -177,6 +183,18 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
         }
         Err(e) => crate::log(&format!("Clip save failed: {e}")),
     }
+}
+
+/// Seen before the fight's first kill, so the clip shows how the fight started.
+const FIGHT_LEAD: f64 = 5.0;
+
+/// Seconds before the death a dynamic clip keeps: the fight plus a lead-in, never less than the
+/// `before` setting and never more than `MAX_BEFORE`.
+fn clip_before(fight: f64, before: f64) -> f64 {
+    if fight <= 0.0 {
+        return before;
+    }
+    (fight + FIGHT_LEAD).min(MAX_BEFORE).max(before)
 }
 
 /// Seconds into the game, or 0 if the game doesn't say.
@@ -343,6 +361,15 @@ mod tests {
         assert_eq!(safe("Ñunu & Willump"), "unu-Willump"); // non-ASCII is replaced, edges trimmed
         assert_eq!(safe("???"), "unknown");
         assert_eq!(safe(&"x".repeat(80)).len(), 60);
+    }
+
+    #[test]
+    fn dynamic_clips_cover_the_fight() {
+        assert_eq!(clip_before(0.0, 15.0), 15.0); // no fight: the setting
+        assert_eq!(clip_before(5.0, 15.0), 15.0); // a short fight fits in the usual clip
+        assert_eq!(clip_before(25.0, 15.0), 30.0); // the fight plus the lead-in
+        assert_eq!(clip_before(90.0, 15.0), MAX_BEFORE); // capped
+        assert_eq!(clip_before(25.0, 50.0), 50.0); // never shorter than the setting
     }
 
     #[test]

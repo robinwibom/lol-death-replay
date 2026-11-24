@@ -304,6 +304,8 @@
   const SKIP = 5;
   // The death's exact frame isn't known, so the zone starts this many seconds before it.
   const ZONE_LEAD = 3;
+  // Playback starts this many seconds before the death; the rest of the clip is a scrub away.
+  const START_LEAD = 5;
   let aspect = 16 / 9;
   let zoneStart = 1;  // fraction of the clip where the death zone starts; 1 = no zone
 
@@ -332,8 +334,9 @@
     if (video.duration) video.currentTime = clamp(t, 0, video.duration - 0.01);
   };
 
-  // Plays once and stops on the last frame; pressing play again starts over (the browser rewinds
-  // an ended video by itself). Always starts at 1×; the speed menu changes it while watching.
+  // Plays once from START_LEAD before the death and stops on the last frame; pressing play again
+  // starts over from the clip's beginning (the browser rewinds an ended video by itself).
+  // Always starts at 1×; the speed menu changes it while watching.
   // Muted (clips have no sound anyway), so autoplay is always allowed.
   video.play();
 
@@ -349,6 +352,7 @@
       zoneStart = Math.max(0, 1 - (deathFromEnd + ZONE_LEAD) / video.duration);
       $('timeline').style.setProperty('--zs', `${zoneStart * 100}%`);
       body.classList.add('has-zone');
+      seek(video.duration - deathFromEnd - START_LEAD);
     }
   });
 

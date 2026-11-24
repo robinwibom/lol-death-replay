@@ -15,7 +15,7 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 
-use crate::settings::Settings;
+use crate::settings::{Settings, MAX_BEFORE};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Extra seconds kept beyond the longest clip, so there's always a keyframe (one a second) to start at.
@@ -232,8 +232,10 @@ impl Recorder {
         } else {
             String::new()
         };
-        // Room for the longest clip a death can ask for. It's memory: about 1.3 MB a second at 1080p30.
-        let keep = Duration::from_secs_f64(s.before + s.after + KEEP_MARGIN);
+        // Room for the longest clip a death can ask for. It's memory (about 1.3 MB a second at
+        // 1080p30), so the full minute is only kept with Dynamic clip on.
+        let before = if s.dynamic_clip { s.before.max(MAX_BEFORE) } else { s.before };
+        let keep = Duration::from_secs_f64(before + s.after + KEEP_MARGIN);
 
         let mut child = ffmpeg(ffmpeg_exe)
             .args(["-loglevel", "warning"])

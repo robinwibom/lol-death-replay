@@ -247,6 +247,10 @@
       <div class="stepper"><button data-step="-1" aria-label="Fewer seconds"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6h7"/></svg></button><input type="number" id="before" min="5" max="60" step="1"><button data-step="1" aria-label="More seconds"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6h7M6 2.5v7"/></svg></button></div>
     </div>
     <div class="row">
+      <label class="label" for="dynamicClip">Dynamic clip<span class="path">Keeps the whole fight you died in, up to 60s</span></label>
+      <span class="switch"><input type="checkbox" id="dynamicClip"><span></span></span>
+    </div>
+    <div class="row">
       <label class="label" for="after">Seconds after death</label>
       <div class="stepper"><button data-step="-1" aria-label="Fewer seconds"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6h7"/></svg></button><input type="number" id="after" min="0" max="10" step="1"><button data-step="1" aria-label="More seconds"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6h7M6 2.5v7"/></svg></button></div>
     </div>
@@ -470,6 +474,7 @@
     for (const seg of document.querySelectorAll('.seg')) selectSeg(seg, true);
     $('autoPlay').checked = settings.autoPlay;
     $('saveClips').checked = settings.saveClips;
+    $('dynamicClip').checked = settings.dynamicClip;
     $('clipsDir').textContent = settings.clipsDir;
     $('clipsDir').title = settings.clipsDir;
   }
@@ -495,6 +500,7 @@
 
   $('autoPlay').addEventListener('change', () => { settings.autoPlay = $('autoPlay').checked; saveSoon(); });
   $('saveClips').addEventListener('change', () => { settings.saveClips = $('saveClips').checked; saveSoon(); });
+  $('dynamicClip').addEventListener('change', () => { settings.dynamicClip = $('dynamicClip').checked; saveSoon(); });
   $('startWithWindows').addEventListener('change', saveSoon);
   $('open').addEventListener('click', () => invoke('open_clips_folder'));
   $('log').addEventListener('click', () => invoke('open_log'));

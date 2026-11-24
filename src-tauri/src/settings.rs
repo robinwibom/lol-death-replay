@@ -6,6 +6,9 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
+/// The most seconds before a death a clip can hold; also the settings window's limit for `before`.
+pub const MAX_BEFORE: f64 = 60.0;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -13,6 +16,8 @@ pub struct Settings {
     pub before: f64,
     /// Seconds after the death to keep (so the death itself is in the clip).
     pub after: f64,
+    /// When the death ends a fight, keep the whole fight: more than `before`, up to `MAX_BEFORE`.
+    pub dynamic_clip: bool,
     pub fps: u32,
     /// Recording height in pixels; 0 records at the monitor's native size.
     pub height: u32,
@@ -45,6 +50,7 @@ impl Default for Settings {
         Self {
             before: 15.0,
             after: 2.0,
+            dynamic_clip: true,
             fps: 30,
             height: 1080,
             monitor: 0,
