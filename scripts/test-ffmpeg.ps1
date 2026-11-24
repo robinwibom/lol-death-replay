@@ -37,7 +37,7 @@ Push-Location $dir
 try {
     & $Ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'color=c=gold:s=640x360:r=30:d=4' `
         -vf "scale=-2:'min(360,ih)':flags=fast_bilinear,format=yuv420p" -c:v libx264 `
-        -preset ultrafast -crf 23 -tune zerolatency -g 30 -an -f segment `
+        -preset ultrafast -crf 27 -tune zerolatency -g 30 -an -f segment `
         -segment_time 1 -segment_wrap 7 -segment_format mpegts 'seg%03d.ts'
     if ($LASTEXITCODE -ne 0) { Fail "recording segments failed" }
     $segs = Get-ChildItem -Filter *.ts | Sort-Object Name

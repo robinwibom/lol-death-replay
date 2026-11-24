@@ -29,12 +29,14 @@ const HW_ENCODERS: [&str; 3] = ["h264_nvenc", "h264_amf", "h264_qsv"];
 /// How the recording leaves ffmpeg: MPEG-TS on stdout, each packet passed on as soon as it's made.
 const TO_PIPE: [&str; 6] = ["-an", "-flush_packets", "1", "-f", "mpegts", "pipe:1"];
 
+/// Constant quality 27 on every encoder: about 38% smaller than 23, and hard to tell apart in
+/// League (each step up is ~11% smaller). It sets both clip size and the memory the buffer takes.
 fn encoder_args(encoder: &str) -> &'static [&'static str] {
     match encoder {
-        "h264_nvenc" => &["-preset", "p4", "-rc", "vbr", "-cq", "23"],
-        "h264_amf" => &["-quality", "speed", "-rc", "cqp", "-qp_i", "23", "-qp_p", "23"],
-        "h264_qsv" => &["-preset", "veryfast", "-global_quality", "23"],
-        "libx264" => &["-preset", "ultrafast", "-crf", "23", "-tune", "zerolatency"],
+        "h264_nvenc" => &["-preset", "p4", "-rc", "vbr", "-cq", "27"],
+        "h264_amf" => &["-quality", "speed", "-rc", "cqp", "-qp_i", "27", "-qp_p", "27"],
+        "h264_qsv" => &["-preset", "veryfast", "-global_quality", "27"],
+        "libx264" => &["-preset", "ultrafast", "-crf", "27", "-tune", "zerolatency"],
         _ => &[],
     }
 }
@@ -290,7 +292,7 @@ impl Recorder {
         } else {
             String::new()
         };
-        // Room for the longest clip a death can ask for. It's memory (about 1.3 MB a second at
+        // Room for the longest clip a death can ask for. It's memory (about 0.8 MB a second at
         // 1080p30), so the full minute is only kept with "Include the whole fight" on.
         let keep = Duration::from_secs_f64(s.max_before_death() + s.after + KEEP_MARGIN);
 
