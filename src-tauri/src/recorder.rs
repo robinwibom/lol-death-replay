@@ -1,13 +1,14 @@
-//! Rolling screen recording with ffmpeg: short .ts segments that overwrite the oldest ones,
-//! so the last ~20 seconds are always on disk.
+//! Rolling screen recording: ffmpeg streams MPEG-TS into this process, which keeps the last stretch
+//! of it in memory. Nothing touches the disk until a clip is saved.
 
-use std::io::Write;
+use std::collections::VecDeque;
+use std::io::{Read, Write};
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
@@ -17,7 +18,8 @@ use windows_sys::Win32::System::JobObjects::{
 use crate::settings::Settings;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const SEGMENT_SECS: f64 = 1.0;
+/// Extra seconds kept beyond the longest clip, so there's always a keyframe (one a second) to start at.
+const KEEP_MARGIN: f64 = 3.0;
 const HW_ENCODERS: [&str; 3] = ["h264_nvenc", "h264_amf", "h264_qsv"];
 
 fn encoder_args(encoder: &str) -> &'static [&'static str] {
@@ -72,8 +74,7 @@ fn tie_to_app(child: &Child) {
     }
 }
 
-/// Deletes segment folders left behind by earlier runs that didn't shut down cleanly.
-/// Only call this before the first recording starts: it doesn't know which folder is in use.
+/// Deletes the segment folders that older versions, which buffered on disk, could leave in the temp folder.
 pub fn remove_stale_segments() {
     let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
     for entry in entries.filter_map(|e| e.ok()) {
@@ -117,20 +118,90 @@ pub fn next_capture(capture: &str) -> Option<&'static str> {
     CAPTURES.get(i + 1).copied()
 }
 
+// ---- The in-memory buffer ----
+
+const TS_PACKET: usize = 188;
+
+/// A stretch of the stream from one PAT (the table a reader needs before anything else, which
+/// ffmpeg sends about every 0.1s and right before each keyframe) up to the next one.
+struct Chunk {
+    at: Instant,
+    /// Holds the start of a keyframe, so a clip can start with this chunk.
+    key: bool,
+    bytes: Vec<u8>,
+}
+
+/// The last `keep` of the MPEG-TS stream, cut into chunks that start where a reader can join in.
+struct Ring {
+    chunks: VecDeque<Chunk>,
+    /// A packet cut off by the end of the last read, finished by the next one.
+    partial: Vec<u8>,
+    keep: Duration,
+}
+
+impl Ring {
+    fn new(keep: Duration) -> Self {
+        Self { chunks: VecDeque::new(), partial: Vec::new(), keep }
+    }
+
+    /// Adds what ffmpeg just wrote, then forgets chunks older than `keep`.
+    fn push(&mut self, data: &[u8], now: Instant) {
+        self.partial.extend_from_slice(data);
+        let whole = self.partial.len() / TS_PACKET * TS_PACKET;
+        for packet in self.partial[..whole].as_chunks::<TS_PACKET>().0 {
+            let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
+            if pid == 0 || self.chunks.is_empty() {
+                self.chunks.push_back(Chunk { at: now, key: false, bytes: Vec::new() });
+            }
+            let chunk = self.chunks.back_mut().unwrap();
+            // An adaptation field with the random access indicator set: how ffmpeg marks keyframes.
+            if packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x40 != 0 {
+                chunk.key = true;
+            }
+            chunk.bytes.extend_from_slice(packet);
+        }
+        self.partial.drain(..whole);
+        while self.chunks.front().is_some_and(|c| now.duration_since(c.at) > self.keep) {
+            self.chunks.pop_front();
+        }
+    }
+
+    /// The stream from the last keyframe at least `seconds` before `now` (or the oldest one kept)
+    /// to the end. Starting a little early is fine; starting after a keyframe wouldn't decode.
+    fn last(&self, seconds: f64, now: Instant) -> Vec<u8> {
+        let from = now.checked_sub(Duration::from_secs_f64(seconds)).unwrap_or(now);
+        let start = self
+            .chunks
+            .iter()
+            .rposition(|c| c.key && c.at <= from)
+            .or_else(|| self.chunks.iter().position(|c| c.key))
+            .unwrap_or(self.chunks.len());
+        self.chunks.range(start..).flat_map(|c| c.bytes.iter().copied()).collect()
+    }
+}
+
+/// Keeps the last `max` bytes of what ffmpeg says, for when it stops unexpectedly.
+fn keep_tail(mut from: impl Read, into: Arc<Mutex<Vec<u8>>>, max: usize) {
+    let mut buf = [0u8; 4096];
+    while let Ok(n @ 1..) = from.read(&mut buf) {
+        let mut tail = into.lock().unwrap();
+        tail.extend_from_slice(&buf[..n]);
+        let extra = tail.len().saturating_sub(max);
+        tail.drain(..extra);
+    }
+}
+
 pub struct Recorder {
     ffmpeg: PathBuf,
-    dir: PathBuf,
     /// The capture method actually in use: gfxcapture becomes ddagrab when the game window isn't found.
     pub capture: &'static str,
     child: Mutex<Option<Child>>,
+    ring: Arc<Mutex<Ring>>,
+    errors: Arc<Mutex<Vec<u8>>>,
 }
 
 impl Recorder {
     pub fn start(ffmpeg_exe: &Path, s: &Settings, encoder: &str) -> Result<Self, String> {
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
-        let dir = std::env::temp_dir().join(format!("lol_replay_{stamp}"));
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-
         let window = if s.capture == "gfxcapture" { crate::win::league_window() } else { None };
         if s.capture == "gfxcapture" && window.is_none() {
             crate::log("Game window not found - recording the whole monitor instead");
@@ -161,27 +232,44 @@ impl Recorder {
         } else {
             String::new()
         };
-        let wrap = ((s.before + s.after) / SEGMENT_SECS) as u32 + 3;
-        let log = std::fs::File::create(dir.join("ffmpeg.log")).map_err(|e| e.to_string())?;
+        // Room for the longest clip a death can ask for. It's memory: about 1.3 MB a second at 1080p30.
+        let keep = Duration::from_secs_f64(s.before + s.after + KEEP_MARGIN);
 
-        let child = ffmpeg(ffmpeg_exe)
-            .args(["-loglevel", "warning", "-y"])
+        let mut child = ffmpeg(ffmpeg_exe)
+            .args(["-loglevel", "warning"])
             .args(&input)
             .args(["-vf", &format!("{scale}format={pix}"), "-c:v", encoder])
             .args(encoder_args(encoder))
-            .args(["-g", &s.fps.to_string(), "-an", "-f", "segment"])
-            .args(["-segment_time", &SEGMENT_SECS.to_string(), "-segment_wrap", &wrap.to_string()])
-            .args(["-segment_format", "mpegts", "seg%03d.ts"])
-            .current_dir(&dir)
+            // A keyframe every second, each packet passed on as soon as it's made.
+            .args(["-g", &s.fps.to_string(), "-an", "-flush_packets", "1", "-f", "mpegts", "pipe:1"])
             .stdin(Stdio::piped())
-            .stdout(log.try_clone().map_err(|e| e.to_string())?)
-            .stderr(log)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("couldn't start ffmpeg ({}): {e}", ffmpeg_exe.display()))?;
         tie_to_app(&child);
 
-        crate::log(&format!("Recording started ({capture}, {encoder}, {} fps, {}p)", s.fps, s.height));
-        Ok(Self { ffmpeg: ffmpeg_exe.to_path_buf(), dir, capture, child: Mutex::new(Some(child)) })
+        let ring = Arc::new(Mutex::new(Ring::new(keep)));
+        let mut stdout = child.stdout.take().unwrap();
+        let to_ring = ring.clone();
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; 64 * 1024];
+            while let Ok(n @ 1..) = stdout.read(&mut buf) {
+                to_ring.lock().unwrap().push(&buf[..n], Instant::now());
+            }
+        });
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let stderr = child.stderr.take().unwrap();
+        let to_errors = errors.clone();
+        std::thread::spawn(move || keep_tail(stderr, to_errors, 1500));
+
+        crate::log(&format!(
+            "Recording started ({capture}, {encoder}, {} fps, {}p, keeping the last {:.0}s in memory)",
+            s.fps,
+            s.height,
+            keep.as_secs_f64()
+        ));
+        Ok(Self { ffmpeg: ffmpeg_exe.to_path_buf(), capture, child: Mutex::new(Some(child)), ring, errors })
     }
 
     pub fn alive(&self) -> bool {
@@ -193,7 +281,7 @@ impl Recorder {
 
     fn stop(&self) {
         if let Some(mut child) = self.child.lock().unwrap().take() {
-            // "q" lets ffmpeg finish the current segment cleanly.
+            // "q" lets ffmpeg stop cleanly.
             if let Some(stdin) = child.stdin.as_mut() {
                 let _ = stdin.write_all(b"q").and_then(|_| stdin.flush());
             }
@@ -209,53 +297,45 @@ impl Recorder {
     }
 
     pub fn error_tail(&self) -> String {
-        let text = std::fs::read_to_string(self.dir.join("ffmpeg.log")).unwrap_or_default();
-        let start = text.len().saturating_sub(1500);
-        text.get(start..).unwrap_or(&text).to_string()
+        String::from_utf8_lossy(&self.errors.lock().unwrap()).into_owned()
     }
 
-    /// Stitches the newest segments together and keeps the last `seconds`.
+    /// Saves about the last `seconds` as an .mp4, from the keyframe just before (so up to a second more).
     pub fn save_last(&self, seconds: f64, out: &Path) -> Result<(), String> {
-        let mut segs: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(&self.dir)
-            .map_err(|e| e.to_string())?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".ts"))
-            .filter_map(|e| {
-                let meta = e.metadata().ok()?;
-                (meta.len() > 0).then(|| (meta.modified().ok().unwrap_or(UNIX_EPOCH), e.path()))
-            })
-            .collect();
-        segs.sort();
-        let need = (seconds / SEGMENT_SECS) as usize + 2;
-        let segs = &segs[segs.len().saturating_sub(need)..];
-        if segs.is_empty() {
-            return Err("no recording yet".into());
-        }
-        let names: Vec<String> = segs
-            .iter()
-            .map(|(_, p)| p.file_name().unwrap().to_string_lossy().into_owned())
-            .collect();
-        let result = ffmpeg(&self.ffmpeg)
-            .args(["-loglevel", "error", "-y", "-sseof", &format!("-{seconds}")])
-            .args(["-i", &format!("concat:{}", names.join("|"))])
-            .args(["-c", "copy", "-movflags", "+faststart"])
-            .arg(out)
-            .current_dir(&self.dir)
-            .output()
-            .map_err(|e| e.to_string())?;
-        if result.status.success() {
-            Ok(())
-        } else {
-            let err = String::from_utf8_lossy(&result.stderr);
-            Err(err.chars().rev().take(500).collect::<Vec<_>>().into_iter().rev().collect())
-        }
+        let stream = self.ring.lock().unwrap().last(seconds, Instant::now());
+        save_stream(&self.ffmpeg, stream, out)
     }
+}
+
+/// Turns MPEG-TS bytes into an .mp4 without re-encoding.
+fn save_stream(ffmpeg_exe: &Path, stream: Vec<u8>, out: &Path) -> Result<(), String> {
+    if stream.is_empty() {
+        return Err("no recording yet".into());
+    }
+    let mut child = ffmpeg(ffmpeg_exe)
+        .args(["-loglevel", "error", "-y", "-f", "mpegts", "-i", "pipe:0"])
+        .args(["-c", "copy", "-movflags", "+faststart"])
+        .arg(out)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    // Written from another thread, so ffmpeg can't get stuck on a full stderr while we write.
+    let mut stdin = child.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || stdin.write_all(&stream));
+    let result = child.wait_with_output().map_err(|e| e.to_string())?;
+    let written = writer.join().map_err(|_| "couldn't hand the clip to ffmpeg".to_string())?;
+    if !result.status.success() {
+        let err = String::from_utf8_lossy(&result.stderr);
+        return Err(err.chars().rev().take(500).collect::<Vec<_>>().into_iter().rev().collect());
+    }
+    written.map_err(|e| e.to_string())
 }
 
 impl Drop for Recorder {
     fn drop(&mut self) {
         self.stop();
-        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -268,5 +348,93 @@ mod tests {
         assert_eq!(next_capture("gfxcapture"), Some("ddagrab"));
         assert_eq!(next_capture("ddagrab"), Some("gdigrab"));
         assert_eq!(next_capture("gdigrab"), None);
+    }
+
+    /// A TS packet: PAT (pid 0), a keyframe start (random access indicator set) or other video.
+    fn packet(kind: &str) -> Vec<u8> {
+        let mut p = vec![0xffu8; TS_PACKET];
+        p[0] = 0x47;
+        let pid: u16 = if kind == "pat" { 0 } else { 256 };
+        (p[1], p[2], p[3]) = ((pid >> 8) as u8, pid as u8, 0x10);
+        if kind == "key" {
+            (p[3], p[4], p[5]) = (0x30, 1, 0x40);
+        }
+        p
+    }
+
+    #[test]
+    fn ring_keeps_recent_chunks_starting_at_keyframes() {
+        let t0 = Instant::now();
+        let at = |s: f64| t0 + Duration::from_secs_f64(s);
+        let mut ring = Ring::new(Duration::from_secs(5));
+        // Every second: PAT + keyframe + video. Every half second between: PAT + video.
+        for i in 0..10 {
+            let s = f64::from(i);
+            ring.push(&[packet("pat"), packet("key"), packet("video")].concat(), at(s));
+            ring.push(&[packet("pat"), packet("video")].concat(), at(s + 0.5));
+        }
+        // Chunks more than 5s older than the newest (9.5) are gone, so 4.5 is the oldest left.
+        assert_eq!(ring.chunks.front().unwrap().at, at(4.5));
+
+        // The last 2s from 9.5: the keyframe at 7.0 is the last one at or before 7.5, so the chunks
+        // from 7, 7.5, 8, 8.5, 9 and 9.5: three of 3 packets and three of 2.
+        let last = ring.last(2.0, at(9.5));
+        assert_eq!(last.len(), 15 * TS_PACKET);
+        assert_eq!(&last[..TS_PACKET], &packet("pat")[..]); // starts at the PAT before the keyframe
+        assert_eq!(&last[TS_PACKET..2 * TS_PACKET], &packet("key")[..]);
+
+        // More than is kept: from the oldest keyframe (5.0), skipping 4.5 which has none.
+        assert_eq!(ring.last(60.0, at(9.5)).len(), 5 * 5 * TS_PACKET); // 5 seconds of 5 packets
+    }
+
+    #[test]
+    fn ring_joins_packets_split_across_reads() {
+        let mut ring = Ring::new(Duration::from_secs(5));
+        let data = [packet("pat"), packet("key")].concat();
+        let now = Instant::now();
+        ring.push(&data[..100], now);
+        ring.push(&data[100..300], now);
+        ring.push(&data[300..], now);
+        assert_eq!(ring.last(0.0, now), data);
+    }
+
+    /// Records a few seconds through the real ffmpeg, the way a game is, and saves the end of it.
+    /// Run with `cargo test -- --ignored` when changing how recording or saving works.
+    #[test]
+    #[ignore]
+    fn saves_a_playable_clip_from_memory() {
+        let exe = Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries/ffmpeg-x86_64-pc-windows-msvc.exe");
+        let mut child = ffmpeg(&exe)
+            .args(["-loglevel", "error", "-re", "-f", "lavfi", "-i", "color=c=red:s=640x360:r=30:d=4"])
+            .args(["-vf", "format=yuv420p", "-c:v", "libx264", "-preset", "ultrafast", "-g", "30"])
+            .args(["-an", "-flush_packets", "1", "-f", "mpegts", "pipe:1"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ring = Ring::new(Duration::from_secs(10));
+        let mut stdout = child.stdout.take().unwrap();
+        let mut buf = vec![0u8; 64 * 1024];
+        while let Ok(n @ 1..) = stdout.read(&mut buf) {
+            ring.push(&buf[..n], Instant::now());
+        }
+        child.wait().unwrap();
+
+        let out = std::env::temp_dir().join(format!("ring_test_{}.mp4", std::process::id()));
+        save_stream(&exe, ring.last(2.0, Instant::now()), &out).unwrap();
+        // ffmpeg reads it back without errors; its length is 2s plus up to a second to the keyframe.
+        let probe = ffmpeg(&exe)
+            .args(["-v", "error", "-i"])
+            .arg(&out)
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-f", "null", "-"]) // decodes every frame
+            .output()
+            .unwrap();
+        assert!(probe.status.success() && probe.stderr.is_empty(), "{}", String::from_utf8_lossy(&probe.stderr));
+        let frames = String::from_utf8_lossy(
+            &ffmpeg(&exe).args(["-i"]).arg(&out).args(["-c", "copy", "-f", "null", "-"]).output().unwrap().stderr,
+        )
+        .to_string();
+        std::fs::remove_file(&out).unwrap();
+        let count: u32 = frames.rsplit("frame=").next().unwrap().split_whitespace().next().unwrap().parse().unwrap();
+        assert!((60..=95).contains(&count), "{count} frames");
     }
 }

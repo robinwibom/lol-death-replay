@@ -50,7 +50,7 @@ Whether to show the replay and whether to save clips (turn both off and it doesn
 
 Deaths are detected with Riot's official [Live Client Data API](https://developer.riotgames.com/docs/lol#game-client-api), which the game serves on `https://127.0.0.1:2999` during a match. The app only reads that API and records your screen with ffmpeg, the same way OBS does. It never touches the game client.
 
-While a match runs, ffmpeg keeps a rolling buffer of 1-second segments. On a death, the app waits 2 seconds, joins the last 17 seconds into an `.mp4` and opens it in the replay window.
+While a match runs, ffmpeg streams the recording into the app, which keeps only the last stretch of it in memory (about 30 MB at 1080p). Nothing is written to disk until a clip is saved. On a death, the app waits 2 seconds, writes the last 17 seconds to an `.mp4` and opens it in the replay window.
 
 ## Building from source
 
