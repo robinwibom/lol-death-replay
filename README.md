@@ -1,6 +1,6 @@
 # LoL Death Replay
 
-When you die in League of Legends, a small replay window pops up over the game and plays the moments leading up to your death, so you can see what went wrong while you wait to respawn. If you died in a fight, the clip covers the whole fight. Every death is also saved as a clip, named with the game time and who killed you.
+When you die in League of Legends, a small replay window pops up over the game and plays the moments leading up to your death, so you can see what went wrong while you wait to respawn. Turn on **Include the whole fight** and a death that ends a fight gets a clip of the whole fight. Every death is also saved as a clip, named with the game time and who killed you.
 
 It runs quietly in the system tray. It starts recording when a match begins and stops when it ends.
 
@@ -39,7 +39,7 @@ Not every moment worth keeping is a death. During a game, press **Ctrl+Shift+S**
 
 ### Settings
 
-Whether to show the replay and whether to save clips (turn both off and it doesn't record at all), how many seconds to keep before and after a death, **Include the whole fight** (when you die in a fight, the clip goes back to where the fight started, up to 60 seconds before the death), recording quality (720p to native; 24, 30, 60 or 120 fps: 24 makes clips about 15% smaller but fast moves look choppier, and 120 only helps on a monitor and game running at 120 or more, with clips and memory use growing to match), **Record game sound** (only the game's own sound: voice chat, music and other apps stay out of clips), the clips folder and its size limit (up to 20 GB; oldest clips are deleted first). Recording changes (sound included), and turning on **Include the whole fight**, apply from the next game.
+Whether to show the replay and whether to save clips (turn both off and it doesn't record at all), how many seconds to keep before and after a death, **Include the whole fight** (off by default; when you die in a fight, the clip goes back to where the fight started, up to 60 seconds before the death), recording quality (720p to native; 24, 30, 60 or 120 fps: 24 makes clips about 15% smaller but fast moves look choppier, and 120 only helps on a monitor and game running at 120 or more, with clips and memory use growing to match), **Record game sound** (only the game's own sound: voice chat, music and other apps stay out of clips), the clips folder and its size limit (up to 20 GB; oldest clips are deleted first). Recording changes (sound included), and turning on **Include the whole fight**, apply from the next game.
 
 ## Troubleshooting
 

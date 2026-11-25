@@ -56,7 +56,7 @@ impl Default for Settings {
         Self {
             before: 12.0,
             after: 1.0,
-            dynamic_clip: true,
+            dynamic_clip: false,
             fps: 30,
             record_sound: true,
             height: 1080,
