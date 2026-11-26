@@ -10,6 +10,8 @@ use tauri::{AppHandle, Manager};
 pub const MAX_BEFORE: f64 = 60.0;
 /// Seen before a fight's first kill, so the clip shows how the fight started.
 const FIGHT_LEAD: f64 = 5.0;
+/// The largest folder size limit, in GB; also the settings window's limit for `max_folder_gb`.
+pub const MAX_FOLDER_GB: f64 = 20.0;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -52,9 +54,9 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            before: 15.0,
-            after: 2.0,
-            dynamic_clip: true,
+            before: 12.0,
+            after: 1.0,
+            dynamic_clip: false,
             fps: 30,
             record_sound: true,
             height: 1080,
@@ -107,6 +109,7 @@ pub fn load(app: &AppHandle) -> (Settings, bool) {
         let videos = app.path().video_dir().unwrap_or_else(|_| std::env::temp_dir());
         s.clips_dir = videos.join("LoLDeathReplay");
     }
+    s.max_folder_gb = s.max_folder_gb.min(MAX_FOLDER_GB); // older versions allowed up to 1000
     (s, saved.is_none())
 }
 
