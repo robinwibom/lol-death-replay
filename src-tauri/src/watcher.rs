@@ -10,7 +10,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager};
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 
-use crate::live_client::{champion, find_killer, last_fight, find_player, is_dead, my_names, LiveClient};
+use crate::live_client::{champion, find_killer, last_fight, find_player, is_dead, my_names, respawn_in, LiveClient};
 use crate::recorder::{ffmpeg_path, next_capture, pick_encoder, remove_stale_segments, Recorder};
 use crate::{player, set_status, settings, toast, win, AppState};
 
@@ -24,6 +24,7 @@ pub fn run(app: AppHandle) {
     let mut names = HashSet::new();
     let mut game_folder: Option<PathBuf> = None; // where this game's clips go, decided once per game
     let mut was_dead = false;
+    let mut close_on_respawn = false; // dead, and the replay closes before respawning
     let mut shown_all_sound = false; // whether the status currently says the sound is all sound
     let mut failed = false; // don't retry recording until the next game
     let mut idle = false; // in a game, but replay and clips are both turned off
@@ -113,12 +114,25 @@ pub fn run(app: AppHandle) {
             continue;
         }
 
-        let dead = client.get("playerlist").is_some_and(|p| is_dead(&p, &names));
+        // A missed answer says nothing: taking it as alive would close the replay early, and the
+        // next answer would look like a new death.
+        let Some(players) = client.get("playerlist") else {
+            thread::sleep(Duration::from_millis(250));
+            continue;
+        };
+        let dead = is_dead(&players, &names);
         if dead && !was_dead {
             crate::log("You died - saving replay...");
             let (app, r, names) = (app.clone(), r.clone(), names.clone());
             let folder = game_folder.clone().unwrap_or_default();
             thread::spawn(move || handle_death(app, r, names, folder));
+            close_on_respawn = true;
+        }
+        // Out of the way a moment before you can move again. Respawning is the backstop, for a
+        // timer that skips past the mark (a revive, say).
+        if close_on_respawn && respawning(&players, &names) {
+            player::close(&app);
+            close_on_respawn = false;
         }
         was_dead = dead;
         thread::sleep(Duration::from_millis(250));
@@ -201,7 +215,11 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
         Ok(()) => {
             crate::log(&format!("Saved {} (killed by {killer})", out.display()));
             *app.state::<AppState>().last_clip.lock().unwrap() = Some(out.clone());
-            if s.auto_play {
+            // A short death timer can run out while the clip saves: it's kept, but not shown.
+            let too_late = client.get("playerlist").is_some_and(|p| respawning(&p, &names));
+            if too_late && s.auto_play {
+                crate::log("Respawned before the replay was ready - not showing it");
+            } else if s.auto_play {
                 player::show(&app, &out, &format!("Death at {min}:{sec:02} - killed by {killer}"), since_death);
             }
             if s.save_clips {
@@ -212,6 +230,14 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
         }
         Err(e) => crate::log(&format!("Clip save failed: {e}")),
     }
+}
+
+/// How long before respawning the replay closes, in seconds.
+const CLOSE_BEFORE_RESPAWN: f64 = 1.0;
+
+/// Whether the local player is about to respawn or already has: time for the replay to go.
+fn respawning(players: &Value, names: &HashSet<String>) -> bool {
+    !is_dead(players, names) || respawn_in(players, names).is_some_and(|t| t <= CLOSE_BEFORE_RESPAWN)
 }
 
 /// How much later than `after` a death's event can still be this death's: a poll (0.25s), the API

@@ -31,7 +31,7 @@ It stays on top of the game and never takes your keyboard away from it. Move the
 - **Bottom row**: back 5s, play/pause and forward 5s; on the right, sound (click the speaker to mute, hover it for the volume, both remembered; it's greyed out when the clip has no sound, e.g. with **Record game sound** off) and playback speed (0.25× to 2×).
 - **X** (top right) closes it. **Ctrl+Shift+X** also closes it from inside the game.
 
-It closes by itself the next time you die (replaced by the new replay) and when the game ends.
+It closes by itself a second before you respawn, the next time you die (replaced by the new replay) and when the game ends.
 
 ### Saving a moment
 
