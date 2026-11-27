@@ -95,7 +95,7 @@ cd ffmpeg
     `# their frames arrive "encoded": lavfi as wrapped_avframe, gdigrab as bmp` \
     --enable-decoder=wrapped_avframe,bmp \
     --enable-filter=gfxcapture,ddagrab,hwdownload,format,scale,color,null \
-    `# recording: Matroska into a pipe, which the app keeps in memory (null: the encoder probe)` \
+    `# recording: Matroska into a pipe, which the app keeps in memory (null: the tests decode clips into it)` \
     --enable-muxer=matroska,null \
     `# saving a clip: the app pipes the Matroska back in, ffmpeg copies it into .mp4` \
     --enable-protocol=file,pipe --enable-demuxer=matroska --enable-muxer=mp4 \
@@ -112,6 +112,13 @@ if ! grep -q "CONFIG_GFXCAPTURE_FILTER 1" config_components.h; then # filters ar
     echo "gfxcapture was left out (see configure's warning above, and ffbuild/config.log)" >&2
     exit 1
 fi
+# The same for the AV1 encoders, which need recent enough NVIDIA, AMD and Intel headers.
+for enc in AV1_NVENC AV1_AMF AV1_QSV; do
+    if ! grep -q "CONFIG_${enc}_ENCODER 1" config_components.h; then
+        echo "$enc was left out (see configure's output, and ffbuild/config.log)" >&2
+        exit 1
+    fi
+done
 make -j "$JOBS" >/dev/null
 $HOST-strip ffmpeg.exe
 
