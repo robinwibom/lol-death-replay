@@ -3,9 +3,9 @@
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, FILETIME, SYSTEMTIME, WIN32_ERROR};
 use windows_sys::Win32::System::Registry::{
@@ -18,11 +18,12 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK,
-    RID_INPUT, RIM_TYPEKEYBOARD,
+    RIDEV_REMOVE, RID_INPUT, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetMessageW, GetWindowThreadProcessId, RegisterClassW,
-    SetWindowDisplayAffinity, MSG, RI_KEY_BREAK, RI_KEY_E0, WDA_EXCLUDEFROMCAPTURE, WM_INPUT, WNDCLASSW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetMessageW, GetWindowThreadProcessId, PostMessageW,
+    RegisterClassW, SetWindowDisplayAffinity, HWND_MESSAGE, MSG, RI_KEY_BREAK, RI_KEY_E0, WDA_EXCLUDEFROMCAPTURE, WM_APP,
+    WM_INPUT, WNDCLASSW,
 };
 
 fn wide(s: &str) -> Vec<u16> {
@@ -135,8 +136,9 @@ pub fn hotkey_is_free(combo: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Starts the one thread that reads the keyboard (a process gets one Raw Input target per device
-/// kind). Must run after Tauri's event loop exists, so ours is the keyboard target that stays.
+/// Starts the one thread that reads the keyboard, and the mouse while inputs are recorded
+/// (inputs.rs). A process gets one Raw Input target per device kind, so it's shared. Must run
+/// after Tauri's event loop exists, so ours is the keyboard target that stays.
 fn start_listener() -> Result<(), String> {
     static STARTED: OnceLock<Result<(), String>> = OnceLock::new();
     STARTED
@@ -148,54 +150,101 @@ fn start_listener() -> Result<(), String> {
         .clone()
 }
 
+/// The listener's window, for `watch_mouse` to post to.
+static LISTENER: AtomicUsize = AtomicUsize::new(0);
+/// Posted to the listener: wParam 1 starts reading the mouse, 0 stops.
+const WM_WATCH_MOUSE: u32 = WM_APP + 1;
+const KEYBOARD: u16 = 0x06;
+const MOUSE: u16 = 0x02;
+
+/// Starts or stops reading mouse buttons for inputs.rs. Only while inputs are recorded: the mouse
+/// sends hundreds of events a second, no reason to wake up for otherwise. Registering is done by
+/// the listener's own thread, which owns the window the input goes to.
+pub fn watch_mouse(on: bool) {
+    if start_listener().is_ok() {
+        unsafe { PostMessageW(LISTENER.load(Ordering::SeqCst) as _, WM_WATCH_MOUSE, usize::from(on), 0) };
+    }
+}
+
+/// Sends a device kind's raw input to `hwnd`, or stops it.
+fn raw_device(usage: u16, hwnd: *mut c_void, on: bool) -> bool {
+    let device = RAWINPUTDEVICE {
+        usUsagePage: 0x01, // generic desktop
+        usUsage: usage,
+        // INPUTSINK: also while another app (the game) is in front. Removing takes no window.
+        dwFlags: if on { RIDEV_INPUTSINK } else { RIDEV_REMOVE },
+        hwndTarget: if on { hwnd } else { null_mut() },
+    };
+    unsafe { RegisterRawInputDevices(&device, 1, size_of::<RAWINPUTDEVICE>() as u32) != 0 }
+}
+
 fn listen(ready: std::sync::mpsc::Sender<Result<(), String>>) {
     unsafe {
         let class = wide("LoLDeathReplayKeys");
         let wc = WNDCLASSW { lpfnWndProc: Some(DefWindowProcW), lpszClassName: class.as_ptr(), ..std::mem::zeroed() };
         RegisterClassW(&wc);
-        // A hidden window to receive the input; it's never shown.
-        let hwnd = CreateWindowExW(0, class.as_ptr(), null(), 0, 0, 0, 0, 0, null_mut(), null_mut(), null_mut(), null());
-        let device = RAWINPUTDEVICE {
-            usUsagePage: 0x01, // generic desktop
-            usUsage: 0x06,     // keyboard
-            dwFlags: RIDEV_INPUTSINK, // also while another app is in front
-            hwndTarget: hwnd,
-        };
-        if hwnd.is_null() || RegisterRawInputDevices(&device, 1, size_of::<RAWINPUTDEVICE>() as u32) == 0 {
+        // A message-only window to receive the input: never shown, in no list of windows.
+        let hwnd =
+            CreateWindowExW(0, class.as_ptr(), null(), 0, 0, 0, 0, 0, HWND_MESSAGE, null_mut(), null_mut(), null());
+        if hwnd.is_null() || !raw_device(KEYBOARD, hwnd, true) {
             let _ = ready.send(Err("Couldn't start listening for hotkeys".into()));
             return;
         }
+        LISTENER.store(hwnd as usize, Ordering::SeqCst);
         let _ = ready.send(Ok(()));
         let mut down = [false; 256];
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            let now = Instant::now(); // what inputs.rs times inputs by
             if msg.message == WM_INPUT {
-                if let Some((vk, pressed)) = read_key(msg.lParam) {
-                    on_key(&mut down, vk, pressed);
+                match read_input(msg.lParam) {
+                    Some(Raw::Key(vk, pressed)) => {
+                        crate::inputs::raw_key(vk as u16, pressed, now);
+                        on_key(&mut down, vk, pressed);
+                    }
+                    Some(Raw::Mouse(buttons)) => {
+                        #[cfg(test)]
+                        tests::MOUSE_EVENTS.fetch_add(1, Ordering::SeqCst);
+                        crate::inputs::raw_mouse(buttons, now);
+                    }
+                    None => {}
                 }
+            } else if msg.message == WM_WATCH_MOUSE && !raw_device(MOUSE, hwnd, msg.wParam != 0) {
+                crate::log("Couldn't start or stop reading mouse clicks");
             }
             DispatchMessageW(&msg); // WM_INPUT needs DefWindowProc to clean up
         }
     }
 }
 
-/// The key code of a WM_INPUT keyboard event, and whether it went down.
-unsafe fn read_key(lparam: isize) -> Option<(usize, bool)> {
+enum Raw {
+    /// A key code, and whether it went down.
+    Key(usize, bool),
+    /// RAWMOUSE's button flags (0 for movement alone).
+    Mouse(u32),
+}
+
+/// What a WM_INPUT carries.
+unsafe fn read_input(lparam: isize) -> Option<Raw> {
     let mut input: RAWINPUT = std::mem::zeroed();
     let mut size = size_of::<RAWINPUT>() as u32;
     let header = size_of::<RAWINPUTHEADER>() as u32;
-    if GetRawInputData(lparam as HRAWINPUT, RID_INPUT, (&raw mut input).cast(), &mut size, header) == u32::MAX
-        || input.header.dwType != RIM_TYPEKEYBOARD
-    {
+    if GetRawInputData(lparam as HRAWINPUT, RID_INPUT, (&raw mut input).cast(), &mut size, header) == u32::MAX {
         return None;
     }
-    let kb = input.data.keyboard;
-    // 0xFF: part of an escape sequence. E0 + 2A/36: a "fake shift" Windows adds around some keys.
-    let fake_shift = kb.Flags as u32 & RI_KEY_E0 != 0 && (kb.MakeCode == 0x2A || kb.MakeCode == 0x36);
-    if kb.VKey == 0xFF || fake_shift {
-        return None;
+    match input.header.dwType {
+        RIM_TYPEKEYBOARD => {
+            let kb = input.data.keyboard;
+            // 0xFF: part of an escape sequence. E0 + 2A/36: a "fake shift" Windows adds around some keys.
+            let fake_shift = kb.Flags as u32 & RI_KEY_E0 != 0 && (kb.MakeCode == 0x2A || kb.MakeCode == 0x36);
+            if kb.VKey == 0xFF || fake_shift {
+                return None;
+            }
+            Some(Raw::Key(kb.VKey as usize, kb.Flags as u32 & RI_KEY_BREAK == 0))
+        }
+        RIM_TYPEMOUSE => Some(Raw::Mouse(u32::from(input.data.mouse.Anonymous.Anonymous.usButtonFlags))),
+        _ => None,
     }
-    Some((kb.VKey as usize, kb.Flags as u32 & RI_KEY_BREAK == 0))
 }
 
 /// Tracks which keys are down, and runs a binding when its key goes down with exactly its modifiers.
@@ -306,7 +355,7 @@ pub fn local_time(t: SystemTime) -> SYSTEMTIME {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
     #[test]
@@ -348,6 +397,38 @@ mod tests {
         inputs.extend(mods.iter().rev().map(|&m| key(m, true)));
         unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
         std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+
+    /// Mouse events the listener has read, so a test can see it reads them only while watched.
+    pub static MOUSE_EVENTS: AtomicU64 = AtomicU64::new(0);
+    /// Held by tests that start or stop reading the mouse, which is one switch for the whole process.
+    pub static MOUSE_SWITCH: Mutex<()> = Mutex::new(());
+
+    /// Moves the mouse by nothing with synthetic input, which Raw Input still reports.
+    fn nudge_mouse() {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT};
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: 0, dwFlags: MOUSEEVENTF_MOVE, time: 0, dwExtraInfo: 0 } },
+        };
+        unsafe { SendInput(1, &input, size_of::<INPUT>() as i32) };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+
+    #[test]
+    fn reads_the_mouse_only_while_watched() {
+        let _switch = MOUSE_SWITCH.lock().unwrap_or_else(|e| e.into_inner());
+        start_listener().unwrap();
+        watch_mouse(true);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let before = MOUSE_EVENTS.load(Ordering::SeqCst);
+        nudge_mouse();
+        assert!(MOUSE_EVENTS.load(Ordering::SeqCst) > before, "read while watched");
+        watch_mouse(false);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let stopped = MOUSE_EVENTS.load(Ordering::SeqCst);
+        nudge_mouse();
+        assert_eq!(MOUSE_EVENTS.load(Ordering::SeqCst), stopped, "not read once stopped");
     }
 
     #[test]
