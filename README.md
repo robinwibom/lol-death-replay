@@ -39,12 +39,14 @@ Not every moment worth keeping is a death. During a game, press **Ctrl+Shift+S**
 
 ### Settings
 
-Whether to show the replay and whether to save clips (turn both off and it doesn't record at all), how many seconds to keep before and after a death, **Include the whole fight** (off by default; when you die in a fight, the clip goes back to where the fight started, up to 60 seconds before the death), recording quality (720p to native; 24, 30, 60 or 120 fps: 24 makes clips about 15% smaller but fast moves look choppier, and 120 only helps on a monitor and game running at 120 or more, with clips and memory use growing to match), **Record game sound** (only the game's own sound: voice chat, music and other apps stay out of clips), the clips folder and its size limit (up to 20 GB; oldest clips are deleted first). Recording changes (sound included), and turning on **Include the whole fight**, apply from the next game.
+Whether to show the replay and whether to save clips (turn both off and it doesn't record at all), how many seconds to keep before and after a death, **Include the whole fight** (off by default; when you die in a fight, the clip goes back to where the fight started, up to 60 seconds before the death), recording quality (720p to native; 24, 30, 60 or 120 fps: 24 makes clips about 15% smaller but fast moves look choppier, and 120 only helps on a monitor and game running at 120 or more, with clips and memory use growing to match), **Record game sound** (only the game's own sound: voice chat, music and other apps stay out of clips), **Record in H.264** (see below), the clips folder and its size limit (up to 20 GB; oldest clips are deleted first). Recording changes (sound included), and turning on **Include the whole fight**, apply from the next game.
+
+Clips are AV1 on graphics cards that encode it (NVIDIA RTX 40 or newer, AMD RX 7000 or newer, Intel Arc or Core Ultra) and H.264 on older ones. AV1 looks the same in smaller clips. It plays in browsers, Discord and the replay window; Windows' Photos and Media Player need the free AV1 Video Extension from the Microsoft Store. If clips go somewhere that can't play AV1, turn on **Record in H.264**: clips get larger but play everywhere.
 
 ## Troubleshooting
 
 - **Replays are black**: check the game is in Borderless mode. If they still are, close the app, set `"capture": "gdigrab"` in `%APPDATA%\io.github.robinwibom.loldeathreplay\settings.json` and start it again. (The app already switches to that by itself when fast capture fails outright.)
-- **The game stutters**: lower **Quality** to 720p. The app uses your graphics card's video encoder (NVIDIA, AMD or Intel); the log says which one.
+- **The game stutters**: lower **Quality** to 720p. The app uses your graphics card's video encoder (NVIDIA, AMD or Intel), AV1 when it has one; the log says which one.
 - **Replay doesn't appear over the game**: use Borderless mode; true fullscreen hides other windows.
 - Anything else: **Settings → Open log**.
 
@@ -52,7 +54,7 @@ Whether to show the replay and whether to save clips (turn both off and it doesn
 
 Deaths are detected with Riot's official [Live Client Data API](https://developer.riotgames.com/docs/lol#game-client-api), which the game serves on `https://127.0.0.1:2999` during a match. The app only reads that API and records your screen with ffmpeg, the same way OBS does. It never touches the game client.
 
-While a match runs, ffmpeg streams the recording into the app, which keeps only the last stretch of it in memory (about 20 MB at 1080p, or 55 MB with **Include the whole fight** on, which keeps a full minute, plus 4 or 12 MB of sound). Nothing is written to disk until a clip is saved.
+While a match runs, ffmpeg streams the recording into the app, which keeps only the last stretch of it in memory (about 20 MB at 1080p in H.264, less in AV1, or 55 MB with **Include the whole fight** on, which keeps a full minute, plus 4 or 12 MB of sound). Nothing is written to disk until a clip is saved, and then the video is copied into the `.mp4` as it is, never encoded twice. The stream is Matroska, which carries AV1 as well as H.264, one frame per cluster, so a clip can start exactly on a keyframe.
 
 Sound is recorded by the app itself, with Windows' per-process loopback (Windows 10 2004 or newer): only what the game plays, the same audio Windows sends to your speakers. Where that isn't available, it records everything the speakers play instead, and the status says so (voice chat may be included). The app keeps looking for the game's process for up to two minutes, in case it starts after the game is reported. The sound is kept beside the video and only joined to it when a clip is saved: the app notes when each bit of sound was heard and works out when each video frame was captured, so they line up to within about 20 milliseconds. Clips carry it as AAC at 128 kbps, about 1 MB a minute. On a death, the app waits 1 second, writes the last 13 seconds to an `.mp4` and opens it in the replay window. With **Include the whole fight** on, it first looks back through the game's kill events for the fight that ended in your death: earlier kills less than 10 seconds apart that share a player (killer, victim or assister) with the fight count as part of it. The clip then starts 5 seconds before the fight's first kill, up to 60 seconds before the death.
 
@@ -68,7 +70,7 @@ Releases are built by GitHub Actions: push a tag like `v0.1.0` and `.github/work
 
 Layout:
 
-- `src-tauri/src/`: the Rust app. `watcher.rs` is the main loop, `recorder.rs` drives ffmpeg, `audio.rs` records the game's sound, `live_client.rs` talks to the game, `player.rs` opens the replay window, `settings.rs` stores settings, `win.rs` holds small Windows helpers (start with Windows, the hotkey, local time).
+- `src-tauri/src/`: the Rust app. `watcher.rs` is the main loop, `recorder.rs` drives ffmpeg (`mkv.rs` reads the Matroska it streams), `audio.rs` records the game's sound, `live_client.rs` talks to the game, `player.rs` opens the replay window, `settings.rs` stores settings, `win.rs` holds small Windows helpers (start with Windows, the hotkey, local time).
 - `ui/`: `player.html` (replay window) and `settings.html`.
 
 ## License
