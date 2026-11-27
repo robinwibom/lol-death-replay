@@ -19,7 +19,7 @@ pub fn run(app: AppHandle) {
     move_into_day_folders(&settings::current(&app).clips_dir);
     let client = LiveClient::new();
     let ffmpeg = ffmpeg_path();
-    let mut auto_encoder: Option<String> = None;
+    let mut auto_encoder: Option<(bool, String)> = None; // (force_h264, the encoder picked)
     let mut rec: Option<Arc<Recorder>> = None;
     let mut names = HashSet::new();
     let mut game_folder: Option<PathBuf> = None; // where this game's clips go, decided once per game
@@ -63,7 +63,11 @@ pub fn run(app: AppHandle) {
             }
             idle = false;
             let encoder = if s.encoder == "auto" {
-                auto_encoder.get_or_insert_with(|| pick_encoder(&ffmpeg)).clone()
+                // Picked once per H.264 setting: testing the encoders takes a moment.
+                if auto_encoder.as_ref().is_none_or(|(force_h264, _)| *force_h264 != s.force_h264) {
+                    auto_encoder = Some((s.force_h264, pick_encoder(&ffmpeg, s.force_h264)));
+                }
+                auto_encoder.as_ref().unwrap().1.clone()
             } else {
                 s.encoder.clone()
             };
