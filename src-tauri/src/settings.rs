@@ -25,6 +25,8 @@ pub struct Settings {
     pub fps: u32,
     /// Record the game's sound into clips.
     pub record_sound: bool,
+    /// Record keys and clicks while the game is in front, for the replay's inputs overlay (inputs.rs).
+    pub record_inputs: bool,
     /// Recording height in pixels; 0 records at the monitor's native size.
     pub height: u32,
     /// Not in the settings window: the main display is recorded unless settings.json says otherwise.
@@ -62,6 +64,7 @@ impl Default for Settings {
             dynamic_clip: false,
             fps: 30,
             record_sound: true,
+            record_inputs: false,
             height: 1080,
             monitor: 0,
             capture: "ddagrab".into(),

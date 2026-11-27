@@ -12,7 +12,7 @@ use windows_sys::Win32::Foundation::SYSTEMTIME;
 
 use crate::live_client::{champion, find_killer, last_fight, find_player, is_dead, my_names, respawn_in, LiveClient};
 use crate::recorder::{ffmpeg_path, next_capture, pick_encoder, remove_stale_segments, Recorder};
-use crate::{player, set_status, settings, toast, win, AppState};
+use crate::{inputs, player, set_status, settings, toast, win, AppState};
 
 pub fn run(app: AppHandle) {
     remove_stale_segments(); // safe here: single-instance means no other copy is recording
@@ -334,9 +334,10 @@ fn move_into_day_folders(dir: &Path) {
     let mut moved = 0;
     for path in entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()) {
         let Some((day, game)) = path.file_name().and_then(|n| n.to_str()).and_then(old_game_folder) else { continue };
-        // The clips folder may be one the user keeps other things in: only clips folders move.
+        // The clips folder may be one the user keeps other things in: only clips folders move
+        // (clips, and the keys and clicks saved beside them).
         let only_clips = std::fs::read_dir(&path).is_ok_and(|mut files| {
-            files.all(|f| f.is_ok_and(|f| f.path().is_file() && f.path().extension().is_some_and(|x| x == "mp4")))
+            files.all(|f| f.is_ok_and(|f| f.path().is_file() && is_clip_file(&f.path())))
         });
         let to = dir.join(day).join(game);
         if !only_clips || to.exists() {
@@ -352,7 +353,13 @@ fn move_into_day_folders(dir: &Path) {
     }
 }
 
-/// "2026-11-21_2130_Jinx_SR" -> ("2026-11-21", "2130_Jinx_SR"); None for any other name.
+/// A clip, or the inputs saved beside one.
+fn is_clip_file(path: &Path) -> bool {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    name.ends_with(".mp4") || name.ends_with(".inputs.json")
+}
+
+/// "2026-11-21_2130_Jinx_SR" ->("2026-11-21", "2130_Jinx_SR"); None for any other name.
 fn old_game_folder(name: &str) -> Option<(&str, &str)> {
     let b = name.as_bytes();
     let digits = |from: usize, to: usize| b.get(from..to).is_some_and(|d| d.iter().all(u8::is_ascii_digit));
@@ -437,7 +444,12 @@ fn prune(dir: &Path, max_bytes: u64, newest: &Path) {
         if path == current {
             continue;
         }
-        let removed = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+        // A game folder holds its clips' inputs too; a single clip has its own beside it.
+        let removed = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path).inspect(|()| drop(std::fs::remove_file(inputs::sidecar(&path))))
+        };
         if removed.is_ok() {
             total -= size;
             if let Some(day) = path.parent().filter(|day| *day != dir) {
@@ -501,6 +513,7 @@ mod tests {
         };
         put("2026-11-21_2130_Jinx_SR/12m40s_by-Ahri.mp4");
         put("2026-11-21_2210_Lux_ARAM/01m00s_saved.mp4");
+        put("2026-11-21_2210_Lux_ARAM/01m00s_saved.inputs.json"); // a clip's inputs move with it
         put("2026-11-22_0900_Jinx_SR/03m00s_by-Vi.mp4");
         put("2026-11-22_1200_photos_trip/beach.jpg"); // not ours: has something besides clips
         put("2026-11-23_1000_Ezreal_SR/05m00s_by-Vi.mp4"); // its new place is already taken
@@ -508,7 +521,7 @@ mod tests {
 
         move_into_day_folders(&dir);
         for moved in ["2026-11-21/2130_Jinx_SR/12m40s_by-Ahri.mp4", "2026-11-21/2210_Lux_ARAM/01m00s_saved.mp4",
-            "2026-11-22/0900_Jinx_SR/03m00s_by-Vi.mp4"] {
+            "2026-11-21/2210_Lux_ARAM/01m00s_saved.inputs.json", "2026-11-22/0900_Jinx_SR/03m00s_by-Vi.mp4"] {
             assert!(dir.join(moved).exists(), "{moved}");
         }
         assert!(!dir.join("2026-11-21_2130_Jinx_SR").exists());
@@ -564,6 +577,11 @@ mod tests {
             path
         };
         let loose = make(&dir, "old.mp4");
+        let other = dir.join("other.inputs.json"); // another clip's inputs: not the loose clip's
+        for inputs in [inputs::sidecar(&loose), other.clone(), inputs::sidecar(&games[0].join("a.mp4"))] {
+            std::fs::create_dir_all(inputs.parent().unwrap()).unwrap();
+            std::fs::write(inputs, "{}").unwrap();
+        }
         make(&games[0], "a.mp4");
         make(&games[0], "b.mp4");
         make(&games[1], "a.mp4");
@@ -576,6 +594,8 @@ mod tests {
         prune(&dir, 250, &newest);
         assert!(!loose.exists() && !games[0].exists() && !games[1].exists());
         assert!(newest.exists());
+        // The loose clip's inputs went with it (game folders' go with the folder).
+        assert!(!inputs::sidecar(&loose).exists() && other.exists());
 
         // The current game is kept even when it alone is over the limit.
         prune(&dir, 0, &newest);

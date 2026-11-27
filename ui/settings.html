@@ -282,6 +282,10 @@
       <label class="label" for="forceH264">Record in H.264<span class="path">Larger clips that play everywhere, instead of AV1</span></label>
       <span class="switch"><input type="checkbox" id="forceH264"><span></span></span>
     </div>
+    <div class="row">
+      <label class="label" for="recordInputs">Record keys and clicks<span class="path">Shown over replays; never what you type in chat</span></label>
+      <span class="switch"><input type="checkbox" id="recordInputs"><span></span></span>
+    </div>
   </div>
 
   <h2>Clips</h2>
@@ -494,6 +498,7 @@
     $('dynamicClip').checked = settings.dynamicClip;
     $('recordSound').checked = settings.recordSound;
     $('forceH264').checked = settings.forceH264;
+    $('recordInputs').checked = settings.recordInputs;
     $('clipsDir').textContent = settings.clipsDir;
     $('clipsDir').title = settings.clipsDir;
   }
@@ -523,6 +528,7 @@
   $('dynamicClip').addEventListener('change', () => { settings.dynamicClip = $('dynamicClip').checked; saveSoon(); });
   $('recordSound').addEventListener('change', () => { settings.recordSound = $('recordSound').checked; saveSoon(); });
   $('forceH264').addEventListener('change', () => { settings.forceH264 = $('forceH264').checked; saveSoon(); });
+  $('recordInputs').addEventListener('change', () => { settings.recordInputs = $('recordInputs').checked; saveSoon(); });
   $('startWithWindows').addEventListener('change', saveSoon);
   $('open').addEventListener('click', () => invoke('open_clips_folder'));
   $('log').addEventListener('click', () => invoke('open_log'));

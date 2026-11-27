@@ -19,6 +19,7 @@ use windows_sys::Win32::System::JobObjects::{
 
 use crate::audio;
 use crate::audio_ring;
+use crate::inputs;
 use crate::settings::Settings;
 use crate::mkv::{self, MKV_HZ};
 
@@ -292,6 +293,8 @@ pub struct Recorder {
     errors: Arc<Mutex<Vec<u8>>>,
     /// The game's sound, unless it's turned off.
     sound: Option<audio::Capture>,
+    /// Keys and clicks, when they're recorded (inputs.rs).
+    inputs: Option<inputs::Capture>,
 }
 
 impl Recorder {
@@ -353,6 +356,7 @@ impl Recorder {
         let to_errors = errors.clone();
         std::thread::spawn(move || keep_tail(stderr, to_errors, 1500));
         let sound = s.record_sound.then(|| audio::Capture::start(crate::win::league_process(), keep));
+        let inputs = s.record_inputs.then(|| inputs::Capture::start(keep, inputs::Area::of_capture(capture)));
 
         crate::log(&format!(
             "Recording started ({capture}, {encoder}, {} fps, {}p, {}, keeping the last {:.0}s in memory)",
@@ -361,7 +365,7 @@ impl Recorder {
             if sound.is_some() { "with sound" } else { "no sound" },
             keep.as_secs_f64()
         ));
-        Ok(Self { ffmpeg: ffmpeg_exe.to_path_buf(), capture, child: Mutex::new(Some(child)), ring, errors, sound })
+        Ok(Self { ffmpeg: ffmpeg_exe.to_path_buf(), capture, child: Mutex::new(Some(child)), ring, errors, sound, inputs })
     }
 
     /// Whether the sound being recorded is all the speakers' sound, not just the game's (voice chat
@@ -399,8 +403,10 @@ impl Recorder {
     }
 
     /// Saves about the last `seconds` as an .mp4, from the keyframe just before (so up to a second more).
+    /// With keys and clicks recorded, they're saved beside it (inputs.rs).
     pub fn save_last(&self, seconds: f64, out: &Path) -> Result<(), String> {
-        let cut = self.ring.lock().unwrap().since_keyframe_before(seconds, Instant::now());
+        let now = Instant::now();
+        let cut = self.ring.lock().unwrap().since_keyframe_before(seconds, now);
         let sound = match (&self.sound, cut.first_frame_at) {
             (Some(sound), Some(starts)) => Some(sound.since(starts)),
             (Some(_), None) => {
@@ -410,7 +416,10 @@ impl Recorder {
             (None, _) => None,
         };
         // Empty when nothing was heard yet: no sound track rather than a silent one.
-        save_stream(&self.ffmpeg, cut.stream, sound.filter(|s| !s.is_empty()).as_deref(), out)
+        save_stream(&self.ffmpeg, cut.stream, sound.filter(|s| !s.is_empty()).as_deref(), out)?;
+        // Timed from the same first frame as the sound.
+        inputs::save_beside(self.inputs.as_ref(), cut.first_frame_at, now, out);
+        Ok(())
     }
 }
 
