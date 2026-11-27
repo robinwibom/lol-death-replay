@@ -35,6 +35,9 @@ pub struct Settings {
     pub capture: String,
     /// "auto" or a specific ffmpeg encoder such as "h264_nvenc".
     pub encoder: String,
+    /// With "auto", record H.264 even on a graphics card that encodes AV1: larger clips, but they
+    /// play everywhere (AV1 needs a recent browser or app, and an extension in Windows' Photos).
+    pub force_h264: bool,
     /// Pop up the replay window after each death.
     pub auto_play: bool,
     /// Keep each death's clip in `clips_dir`. When off, the replay uses a temporary file instead.
@@ -63,6 +66,7 @@ impl Default for Settings {
             monitor: 0,
             capture: "ddagrab".into(),
             encoder: "auto".into(),
+            force_h264: false,
             auto_play: true,
             save_clips: true,
             save_key: "Ctrl+Shift+S".into(),

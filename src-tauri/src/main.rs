@@ -4,12 +4,12 @@
 mod audio;
 mod audio_ring;
 mod live_client;
+mod mkv;
 mod mp4;
 mod player;
 mod recorder;
 mod settings;
 mod toast;
-mod ts;
 mod updater;
 mod watcher;
 mod win;
