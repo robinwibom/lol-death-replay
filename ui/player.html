@@ -244,6 +244,51 @@
   #speed-menu button[aria-checked="true"] { font-weight: 700; background: rgba(255, 255, 255, 0.1); }
   @keyframes pop { from { opacity: 0; transform: scale(0.95); } }
 
+  /* Keys and clicks saved with the clip (src-tauri/src/inputs.rs), drawn over the video: a strip
+     of keys that light up while held, and a ripple where each click was. */
+  #inputs { position: absolute; inset: 0; pointer-events: none; display: none; }
+  body.has-inputs #inputs { display: block; }
+  body.inputs-off #inputs { display: none; }
+  #ripples { position: absolute; }
+  #keys {
+    --cap: clamp(12px, 4vw, 26px);
+    position: absolute;
+    left: 50%;
+    bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: calc(var(--cap) * 0.14);
+    transform: translateX(-50%);
+    transition: transform 0.2s var(--ease);
+  }
+  /* Out of the controls' way while they show. */
+  body.show #keys { transform: translate(-50%, -70px); }
+  .cap {
+    min-width: var(--cap);
+    height: var(--cap);
+    padding: 0 calc(var(--cap) * 0.2);
+    border-radius: calc(var(--cap) * 0.22);
+    display: grid;
+    place-items: center;
+    font-size: calc(var(--cap) * 0.5);
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.8);
+    background: rgba(18, 18, 20, 0.72);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+    transition: background-color 0.12s ease, color 0.12s ease;
+  }
+  /* Lit at once (it marks when the key went down), fading out a little after. */
+  .cap.on { background: var(--gold); color: #1c1c1e; box-shadow: none; transition: none; }
+  .keys-gap { width: calc(var(--cap) * 0.3); }
+  /* Only while chat was open: says why no keys light up. */
+  #chat-cap { display: none; font-size: calc(var(--cap) * 0.42); letter-spacing: 0.04em; }
+  #chat-cap.on { display: grid; background: rgba(255, 255, 255, 0.85); }
+  #inputs-btn { display: none; }
+  body.has-inputs #inputs-btn { display: grid; }
+  #inputs-btn .off { display: none; }
+  body.inputs-off #inputs-btn .on { display: none; }
+  body.inputs-off #inputs-btn .off { display: block; }
+
   /* Resize from any edge or corner; the window keeps the video's shape. */
   .edge { position: absolute; z-index: 10; touch-action: none; }
   .edge.n, .edge.s { left: 10px; right: 10px; height: 5px; cursor: ns-resize; }
@@ -261,6 +306,7 @@
 <body class="paused">
   <video id="video" preload="auto"></video>
   <div id="surface"></div>
+  <div id="inputs"><canvas id="ripples"></canvas><div id="keys"></div></div>
 
   <div class="shade top"></div>
   <div class="shade bottom"></div>
@@ -299,6 +345,10 @@
     </div>
 
     <div class="group right">
+      <button id="inputs-btn" class="icon ctl" title="Keys and clicks on / off" aria-label="Keys and clicks on or off">
+        <svg class="on" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6.5 10h.01M10 10h.01M14 10h.01M17.5 10h.01M8 14h8"/></svg>
+        <svg class="off" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h10a2.5 2.5 0 0 1 2.5 2.5v7c0 .8-.4 1.6-1 2M17 18H5a2.5 2.5 0 0 1-2.5-2.5v-7A2.5 2.5 0 0 1 5 6"/><path d="M3 3l18 18"/></svg>
+      </button>
       <div class="sound">
         <div id="volume" class="slider ctl" title="Volume">
           <div class="track"><div class="fill"></div></div>
@@ -394,6 +444,118 @@
     }
   });
 
+  // ---- keys and clicks ----
+  // Saved beside the clip when "Record keys and clicks" is on; the format is described in
+  // src-tauri/src/inputs.rs. Everything is drawn from video.currentTime, so it follows seeking,
+  // pausing and slow motion by itself.
+  const STRIP = [['Q', 'W', 'E', 'R'], ['D', 'F'], ['1', '2', '3', '4', '5', '6', '7'], ['B']];
+  const TAP = 0.1;      // a key stays lit at least this long (video seconds), so a quick tap shows
+  const RIPPLE = 0.45;  // how long a click's ripple lasts (video seconds)
+  const CLICK_COLORS = { left: '245, 197, 66', right: '76, 194, 127' }; // others: white
+  let inputs = null;    // { caps: [{ el, spans }], chat: { el, spans }, clicks }
+  const ripples = $('ripples');
+  const ink = ripples.getContext('2d');
+
+  // [from, to) spans in which each key was held (and chat open), from the down/up events.
+  function readInputs(events) {
+    const keys = new Map(), downAt = new Map(), chat = [], clicks = [];
+    let chatFrom = null;
+    const add = (key, from, to) => {
+      if (!keys.has(key)) keys.set(key, []);
+      keys.get(key).push([from, Math.max(to, from + TAP)]);
+    };
+    for (const e of events) {
+      if ('key' in e) {
+        if (e.down && !downAt.has(e.key)) downAt.set(e.key, e.t);
+        else if (!e.down && downAt.has(e.key)) { add(e.key, downAt.get(e.key), e.t); downAt.delete(e.key); }
+      } else if ('button' in e) {
+        clicks.push(e);
+      } else if ('chat' in e) {
+        if (e.chat && chatFrom === null) chatFrom = e.t;
+        else if (!e.chat && chatFrom !== null) { chat.push([chatFrom, e.t]); chatFrom = null; }
+      }
+    }
+    for (const [key, from] of downAt) add(key, from, Infinity); // still held when the clip ends
+    if (chatFrom !== null) chat.push([chatFrom, Infinity]);
+    return { keys, chat, clicks };
+  }
+
+  function showInputs(data) {
+    const { keys, chat, clicks } = readInputs(data.events || []);
+    const strip = $('keys');
+    const cap = (label) => {
+      const el = document.createElement('div');
+      el.className = 'cap';
+      el.textContent = label;
+      strip.append(el);
+      return el;
+    };
+    const caps = [];
+    STRIP.forEach((group, i) => {
+      if (i) strip.append(Object.assign(document.createElement('div'), { className: 'keys-gap' }));
+      for (const key of group) caps.push({ el: cap(key), spans: keys.get(key) || [] });
+    });
+    const chatCap = cap('CHAT');
+    chatCap.id = 'chat-cap';
+    inputs = { caps, chat: { el: chatCap, spans: chat }, clicks };
+    body.classList.add('has-inputs');
+  }
+
+  call('player_inputs', { clip: params.get('clip') })
+    .then((text) => text && showInputs(JSON.parse(text)))
+    .catch((e) => uiLog(`can't read the clip's keys and clicks (${e})`));
+
+  // Where the picture is inside the video element (letterboxed if the shapes differ).
+  function picture() {
+    const W = video.clientWidth, H = video.clientHeight;
+    const vw = video.videoWidth || W, vh = video.videoHeight || H;
+    const s = Math.min(W / vw, H / vh);
+    return { x: (W - vw * s) / 2, y: (H - vh * s) / 2, w: vw * s, h: vh * s };
+  }
+
+  function drawInputs(t) {
+    if (!inputs || body.classList.contains('inputs-off')) return;
+    const lit = (spans) => spans.some(([from, to]) => t >= from && t < to);
+    for (const { el, spans } of inputs.caps) el.classList.toggle('on', lit(spans));
+    inputs.chat.el.classList.toggle('on', lit(inputs.chat.spans));
+
+    const r = picture(), dpr = devicePixelRatio || 1;
+    const w = Math.round(r.w * dpr), h = Math.round(r.h * dpr);
+    if (ripples.width !== w || ripples.height !== h) {
+      Object.assign(ripples.style, { left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` });
+      ripples.width = w;
+      ripples.height = h;
+    }
+    ink.clearRect(0, 0, w, h);
+    for (const c of inputs.clicks) {
+      const age = t - c.t;
+      if (age < 0 || age >= RIPPLE) continue;
+      const p = age / RIPPLE, fade = 1 - p * p;
+      const x = c.x * w, y = c.y * h, size = h / 80;
+      const color = CLICK_COLORS[c.button] || '255, 255, 255';
+      // A dark halo keeps it visible over a bright game.
+      ink.shadowColor = `rgba(0, 0, 0, ${0.7 * fade})`;
+      ink.shadowBlur = 3 * dpr;
+      ink.lineWidth = Math.max(2 * dpr, size * 0.45);
+      ink.strokeStyle = `rgba(${color}, ${fade})`;
+      ink.beginPath();
+      ink.arc(x, y, size * (1.2 + 3.8 * Math.sqrt(p)), 0, Math.PI * 2);
+      ink.stroke();
+      ink.fillStyle = `rgba(${color}, ${fade * 0.9})`;
+      ink.beginPath();
+      ink.arc(x, y, size * 0.6, 0, Math.PI * 2);
+      ink.fill();
+    }
+  }
+
+  // Hidden or shown with its button; remembered for the next replay.
+  body.classList.toggle('inputs-off', localStorage.getItem('inputs') === 'off');
+  $('inputs-btn').addEventListener('click', () => {
+    const off = !body.classList.contains('inputs-off');
+    body.classList.toggle('inputs-off', off);
+    localStorage.setItem('inputs', off ? 'off' : 'on');
+  });
+
   (function render() {
     const d = video.duration || 0;
     const p = d ? video.currentTime / d : 0;
@@ -403,6 +565,7 @@
       body.classList.toggle('inzone', p >= zoneStart);
     }
     $('time').textContent = `${fmt(video.currentTime)} / ${fmt(d)}`;
+    drawInputs(video.currentTime);
     requestAnimationFrame(render);
   })();
 
