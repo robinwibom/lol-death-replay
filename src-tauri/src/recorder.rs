@@ -42,12 +42,17 @@ const TO_PIPE: [&str; 10] =
 /// AV1's scales differ: av1_nvenc's CQ 33-36 looked like h264_nvenc's 26-29 (the same VMAF), so
 /// 27 becomes 34. av1_amf takes AV1's own 0-255 quantizer, about 4 times the 0-63 one (34 -> 136).
 /// av1_qsv's -global_quality is its ICQ level on the same 1-51 scale as H.264's, so it gets 34 too.
+///
+/// `-delay 0` stops NVENC holding frames back before handing them out (by default ~10 frames for
+/// H.264 and ~21 for AV1 at 30 fps). A clip's start is timed by when frames arrive here
+/// (`Ring::capture_origin`), so every frame held back made the sound start that much early: about
+/// 1 s with AV1 in a real game.
 fn encoder_args(encoder: &str) -> &'static [&'static str] {
     match encoder {
-        "av1_nvenc" => &["-preset", "p4", "-rc", "vbr", "-cq", "34"],
+        "av1_nvenc" => &["-preset", "p4", "-rc", "vbr", "-cq", "34", "-delay", "0"],
         "av1_amf" => &["-quality", "speed", "-rc", "cqp", "-qp_i", "136", "-qp_p", "136"],
         "av1_qsv" => &["-preset", "veryfast", "-global_quality", "34"],
-        "h264_nvenc" => &["-preset", "p4", "-rc", "vbr", "-cq", "27"],
+        "h264_nvenc" => &["-preset", "p4", "-rc", "vbr", "-cq", "27", "-delay", "0"],
         "h264_amf" => &["-quality", "speed", "-rc", "cqp", "-qp_i", "27", "-qp_p", "27"],
         "h264_qsv" => &["-preset", "veryfast", "-global_quality", "27"],
         "libx264" => &["-preset", "ultrafast", "-crf", "27", "-tune", "zerolatency"],
@@ -134,15 +139,14 @@ fn encoder_works(ffmpeg_exe: &Path, encoder: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// The encoders to try, best first: AV1 on the GPU (unless `force_h264`), then H.264 on the GPU.
-fn candidates(force_h264: bool) -> impl Iterator<Item = &'static str> {
-    let av1: &[&str] = if force_h264 { &[] } else { &AV1_ENCODERS };
-    av1.iter().chain(&H264_ENCODERS).copied()
+/// The encoders to try, best first: AV1 on the GPU, then H.264 on the GPU.
+fn candidates() -> impl Iterator<Item = &'static str> {
+    AV1_ENCODERS.iter().chain(&H264_ENCODERS).copied()
 }
 
 /// The first GPU encoder that works on this PC, falling back to the CPU (libx264).
-pub fn pick_encoder(ffmpeg_exe: &Path, force_h264: bool) -> String {
-    candidates(force_h264)
+pub fn pick_encoder(ffmpeg_exe: &Path) -> String {
+    candidates()
         .find(|enc| encoder_works(ffmpeg_exe, enc))
         .unwrap_or("libx264")
         .to_string()
@@ -173,6 +177,8 @@ struct Chunk {
 struct Cut {
     stream: Vec<u8>,
     first_frame_at: Option<Instant>,
+    /// A line for the log on how the frames' timing looked (see `Ring::timing`).
+    timing: Option<String>,
 }
 
 /// The Matroska stream's header and its last `keep` of clusters. A clip is the header followed by
@@ -232,8 +238,10 @@ impl Ring {
     /// Frames are stamped from the capture's first frame, a moment ffmpeg doesn't report, but each
     /// arrives here a little after it was captured (converting, encoding, the pipe). So of all the
     /// frames kept, the one that came through fastest gives the closest answer: arrival minus
-    /// timestamp is smallest for it. That's within a few milliseconds of the real capture time,
-    /// and as the oldest frames are forgotten the answer follows any slow drift between clocks.
+    /// timestamp is smallest for it. As the oldest frames are forgotten the answer follows any slow
+    /// drift between clocks. It is late by the pipeline's fastest delay, which nothing here can
+    /// see: a few frames at best, so an encoder must not hold frames back (`-delay 0` on NVENC).
+    /// Each frame of delay is a frame of sound too early in clips.
     fn capture_origin(&self) -> Option<Instant> {
         self.chunks
             .iter()
@@ -258,10 +266,41 @@ impl Ring {
             .zip(first_pts)
             .map(|(origin, pts)| origin + Duration::from_secs_f64(pts as f64 / MKV_HZ));
         if start == self.chunks.len() {
-            return Cut { stream: Vec::new(), first_frame_at: None }; // no keyframe yet: nothing to save
+            return Cut { stream: Vec::new(), first_frame_at: None, timing: None }; // no keyframe yet: nothing to save
         }
         let clusters = self.chunks.range(start..).flat_map(|c| c.bytes.iter().copied());
-        Cut { stream: self.header.iter().copied().chain(clusters).collect(), first_frame_at }
+        let timing = self.timing(start);
+        Cut { stream: self.header.iter().copied().chain(clusters).collect(), first_frame_at, timing }
+    }
+
+    /// For the log: how the frames' timestamps line up with when they arrived, to tell where a clip's
+    /// sound and video drift apart. "Late" is arrival minus timestamp, above the fastest frame kept
+    /// (the one `capture_origin` goes by). Growing over the buffer means the timestamps run slower
+    /// than the clock, or frames queue up before they reach us; either way the clip is timed too
+    /// early and its sound plays late by about the clip's lateness. A delay every frame shares
+    /// doesn't show here: it makes the sound early instead (see `capture_origin`).
+    fn timing(&self, start: usize) -> Option<String> {
+        let late = |c: &Chunk| c.frame.map(|(pts, at)| (pts as f64 / MKV_HZ, at));
+        let frames: Vec<(f64, Instant)> = self.chunks.iter().filter_map(late).collect();
+        let (first, last) = (frames.first()?, frames.last()?);
+        let origin = self.capture_origin()?;
+        let ms = |(pts, at): (f64, Instant)| {
+            (at.duration_since(origin).as_secs_f64() - pts) * 1000.0
+        };
+        let clip: Vec<f64> = self.chunks.range(start..).filter_map(late).map(ms).collect();
+        let (lo, hi) = clip.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        Some(format!(
+            "Clip timing: frames {:.0}-{:.0} ms late (first {:.0}, last {:.0}); buffer: {} frames, \
+             timestamps cover {:.2}s in {:.2}s of arrivals, oldest {:.0} ms late",
+            lo,
+            hi,
+            clip.first()?,
+            clip.last()?,
+            frames.len(),
+            last.0 - first.0,
+            last.1.duration_since(first.1).as_secs_f64(),
+            ms(*first),
+        ))
     }
 }
 
@@ -407,6 +446,9 @@ impl Recorder {
     pub fn save_last(&self, seconds: f64, out: &Path) -> Result<(), String> {
         let now = Instant::now();
         let cut = self.ring.lock().unwrap().since_keyframe_before(seconds, now);
+        if let Some(timing) = &cut.timing {
+            crate::log(timing);
+        }
         let sound = match (&self.sound, cut.first_frame_at) {
             (Some(sound), Some(starts)) => Some(sound.since(starts)),
             (Some(_), None) => {
@@ -554,6 +596,9 @@ mod tests {
         assert_eq!(cut.stream, [header(), cluster(1067, true)].concat());
         let starts = cut.first_frame_at.unwrap().duration_since(t0).as_secs_f64();
         assert!((starts - (0.010 + 1.067)).abs() < 1e-6, "{starts}");
+        // The clip's one frame came 15 ms slower than the fastest; the oldest kept, 20 ms.
+        let timing = cut.timing.unwrap();
+        assert!(timing.contains("frames 15-15 ms late") && timing.contains("oldest 20 ms late"), "{timing}");
     }
 
     #[test]
@@ -571,9 +616,8 @@ mod tests {
 
     #[test]
     fn av1_comes_before_h264_unless_forced() {
-        let all: Vec<_> = candidates(false).collect();
+        let all: Vec<_> = candidates().collect();
         assert_eq!(all, ["av1_nvenc", "av1_amf", "av1_qsv", "h264_nvenc", "h264_amf", "h264_qsv"]);
-        assert!(candidates(true).all(|e| e.starts_with("h264_")));
         assert!(all.iter().all(|e| !encoder_args(e).is_empty()));
     }
 

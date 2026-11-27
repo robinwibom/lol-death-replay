@@ -154,7 +154,7 @@ try {
     # The arguments are encoder_args in recorder.rs.
     if (-not (Test-Pipeline 'libx264' '-preset ultrafast -crf 27 -tune zerolatency' 'yuv420p' 'h264')) { Fail "libx264 doesn't run" }
     $av1 = @{
-        av1_nvenc = '-preset p4 -rc vbr -cq 34'
+        av1_nvenc = '-preset p4 -rc vbr -cq 34 -delay 0'
         av1_amf   = '-quality speed -rc cqp -qp_i 136 -qp_p 136'
         av1_qsv   = '-preset veryfast -global_quality 34'
     }
