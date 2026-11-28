@@ -1,9 +1,11 @@
-# Runs the Rust tests on every push to main. Releases (release.yml) don't run them again.
+# Runs the Rust tests on every push to main and on pull requests. Releases (release.yml) don't run them again.
 name: CI
 
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md", "LICENSE"]
+  pull_request:
     paths-ignore: ["**.md", "LICENSE"]
   workflow_dispatch:
 
