@@ -720,6 +720,19 @@
     }
   }
 
+  // For checking the overlay from a test page (prototypes/player-harness): pauses at video time t,
+  // draws that moment straight away and says what the shutter shows. Drawing doesn't wait for
+  // animation frames, which a browser all but stops while the page is hidden.
+  window.__drawAt = (t) => {
+    video.pause();
+    video.currentTime = t;
+    drawInputs(t);
+    const keys = (pinned) => [...shutter.children]
+      .filter((e) => !e.retired && e.classList.contains('pinned') === pinned)
+      .map((e) => ({ key: e.textContent, held: e.classList.contains('on') }));
+    return { t, row: keys(false), column: keys(true) };
+  };
+
   // Hidden or shown with its button; remembered for the next replay.
   body.classList.toggle('inputs-off', localStorage.getItem('inputs') === 'off');
   $('inputs-btn').addEventListener('click', () => {

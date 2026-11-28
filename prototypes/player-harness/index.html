@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Player test page</title>
+<script>
+// Loads the real ui/player.html in a browser, with the Tauri calls it makes stood in for:
+// the clip and its inputs come from this folder, logs go to the console, window calls do nothing.
+// Serve the repo root (preview "player-harness" in .claude/launch.json) and open /prototypes/player-harness/.
+// In a hidden pane, check a moment with window.__drawAt(seconds) rather than by playing.
+(async () => {
+  const clip = await fetch('/prototypes/player-harness/clip.mp4');
+  if (!clip.ok) {
+    document.body.textContent = 'No clip here yet: run prototypes/player-harness/get-clip.ps1 to copy one in.';
+    return;
+  }
+  const html = await (await fetch('/ui/player.html', { cache: 'no-store' })).text();
+  // In memory, so the video can seek (Python's test server can't serve byte ranges).
+  window.__clipUrl = URL.createObjectURL(await clip.blob());
+  const shim = `<script>
+    window.__TAURI__ = {
+      core: {
+        invoke: async (cmd, args) => {
+          if (cmd === 'player_inputs') return await (await fetch('/prototypes/player-harness/clip.inputs.json', { cache: 'no-store' })).text();
+          if (cmd === 'ui_log') console.log(args.msg);
+          return null;
+        },
+        convertFileSrc: () => window.__clipUrl,
+      },
+      window: { getCurrentWindow: () => ({ startDragging() {} }) },
+    };
+  <\/script>`;
+  document.open();
+  document.write(html.replace('<head>', '<head>' + shim));
+  document.close();
+})();
+</script>

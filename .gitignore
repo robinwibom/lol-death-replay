@@ -8,3 +8,10 @@ src-tauri/gen/
 # ffmpeg is built by scripts/build-ffmpeg.sh, not committed
 src-tauri/binaries/
 target-ffmpeg/
+
+# Claude Code: worktrees and personal settings stay local; .claude/launch.json is shared
+.claude/worktrees/
+.claude/settings.local.json
+
+# The player test page's clip is copied in by get-clip.ps1, not committed
+prototypes/player-harness/clip.*
