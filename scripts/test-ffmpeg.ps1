@@ -14,11 +14,11 @@ function Fail([string]$msg) { Write-Host "FAIL: $msg"; exit 1 }
 # 1. Every component recorder.rs names. "ffmpeg -h <kind>=<name>" starts with "<Kind> <name>" when it's
 # there. Missing ones each say so differently ("Unknown format", "Codec ... is not recognized", ...).
 $needed = @{
-    encoder = 'av1_nvenc', 'av1_amf', 'av1_qsv', 'h264_nvenc', 'h264_amf', 'h264_qsv', 'libx264', 'aac'
-    decoder = 'wrapped_avframe', 'bmp', 'h264', 'pcm_s16le' # lavfi and gdigrab frames; reading clips back; sound
+    encoder = 'av1_nvenc', 'av1_amf', 'av1_qsv', 'h264_nvenc', 'h264_amf', 'h264_qsv', 'libx264', 'aac', 'mjpeg' # mjpeg: thumbnails
+    decoder = 'wrapped_avframe', 'bmp', 'h264', 'av1', 'pcm_s16le' # lavfi and gdigrab frames; reading clips back; sound
     filter  = 'gfxcapture', 'ddagrab', 'hwdownload', 'format', 'scale', 'color', 'anull', 'aformat', 'aresample'
     demuxer = 'gdigrab', 'lavfi', 'matroska', 'mov', 's16le' # mov: only for this test's clip check
-    muxer   = 'matroska', 'mp4', 'null'
+    muxer   = 'matroska', 'mp4', 'null', 'image2' # image2: thumbnails
 }
 foreach ($kind in $needed.Keys) {
     foreach ($name in $needed[$kind]) {
@@ -128,6 +128,14 @@ function Test-Pipeline([string]$encoder, [string]$encoderArgs, [string]$pix, [st
     if ($text.IndexOf('moov') -gt $text.IndexOf('mdat')) { Fail "$encoder`: the clip's index isn't at the start (+faststart)" }
     Write-Host "$encoder clip: OK ($secs s)"
 
+    # Its thumbnail, the way save_thumbnail makes one: AV1 on the graphics card (no software decoder).
+    $hw = if ($codec -eq 'av1') { '-hwaccel d3d11va ' } else { '' }
+    $ok = Invoke-Piped "$hw-sseof -1.00 -i clip.mp4 -frames:v 1 -vf scale=320:-2 -q:v 5 -f image2 thumb.jpg"
+    if (-not $ok -or -not (Test-Path thumb.jpg)) { Fail "$encoder`: making a thumbnail failed" }
+    $jpeg = [IO.File]::ReadAllBytes((Join-Path $dir 'thumb.jpg'))
+    if ($jpeg[0] -ne 0xFF -or $jpeg[1] -ne 0xD8) { Fail "$encoder`: the thumbnail isn't a JPEG" }
+    Write-Host "$encoder thumbnail: OK"
+
     # With sound: 3 s of raw 48 kHz stereo PCM (a tone) beside the video, encoded to AAC.
     $ok = Invoke-Piped ("-f matroska -i pipe:0 -f s16le -ar 48000 -ac 2 -i sound.pcm " +
         "-map 0:v -map 1:a -c:a aac -b:a 128k -c:v copy -movflags +faststart sound.mp4 < cut.mkv")
@@ -136,7 +144,7 @@ function Test-Pipeline([string]$encoder, [string]$encoderArgs, [string]$pix, [st
     if ($info -notmatch "Stream #\d+:\d+.*Video: $codec") { Fail "$encoder`: clip with sound has no $codec video stream:`n$info" }
     if ($info -notmatch 'Stream #\d+:\d+.*Audio: aac.*48000 Hz, stereo') { Fail "$encoder`: clip with sound has no AAC sound:`n$info" }
     Write-Host "$encoder clip with sound: OK"
-    Remove-Item rec.mkv, cut.mkv, clip.mp4, sound.mp4
+    Remove-Item rec.mkv, cut.mkv, clip.mp4, sound.mp4, thumb.jpg
     $true
 }
 

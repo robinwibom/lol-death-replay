@@ -59,8 +59,10 @@ One frame about a second before the death (two seconds before the clip's end, si
 after the death), 320 px wide, saved beside the clip as `<clip>.jpg`. Made by the bundled ffmpeg
 right after the clip is saved.
 
-- **This needs a change to the ffmpeg build:** `scripts/build-ffmpeg.sh` has no image encoder
-  today. It needs the `mjpeg` encoder and the `image2` muxer, at a small size cost.
+- **The ffmpeg build** gains the `mjpeg` encoder and `image2` muxer, plus ffmpeg's own `av1` decoder
+  with `av1_d3d11va`: that decoder only works on the graphics card, and a card that records AV1 also
+  decodes it. A thumbnail is tried in software first (H.264), then on the graphics card (AV1).
+- A clip whose thumbnail fails still plays; the browser shows a plain tile for it.
 - Saved clips (Ctrl+Shift+S) get a frame two seconds before their end as well.
 
 ## Stars
@@ -77,14 +79,14 @@ A star marks a clip as worth coming back to. Its job is to make that clip easy t
 
 ## Pruning with stars
 
-The size limit applies to the whole clips folder: clips, `.inputs.json` files, thumbnails and
-`game.json` files.
+The size limit counts each clip together with its `.inputs.json` and thumbnail (a `game.json` is
+a few kilobytes and isn't counted).
 
 1. Delete **unstarred clips one at a time, oldest first**, across all games, with each clip's
    `.inputs.json` and thumbnail, and its entry in `game.json`.
 2. A game folder goes once it has no clips left, and a day folder goes once it has no games left.
 3. Only if the folder is still over the limit, delete **starred clips**, oldest first, and say so in
-   a toast and on the settings page. Starred clips are never deleted silently.
+   a toast and in the log. Starred clips are never deleted silently.
 4. The game being played right now is never touched, as today.
 
 This replaces today's "remove whole game folders, oldest first" in `watcher.rs::prune`. Tests:

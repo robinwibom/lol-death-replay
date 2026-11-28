@@ -3,6 +3,7 @@
 
 mod audio;
 mod audio_ring;
+mod game;
 mod inputs;
 mod live_client;
 mod mkv;
@@ -32,7 +33,7 @@ pub struct AppState {
     replay_item: MenuItem<Wry>,
     pub last_clip: Mutex<Option<PathBuf>>,
     /// While a game records: its recorder and its clip folder (inside the clips folder), for the save hotkey.
-    pub recording: Mutex<Option<(Arc<recorder::Recorder>, PathBuf)>>,
+    pub recording: Mutex<Option<(Arc<recorder::Recorder>, game::Current)>>,
     /// The save hotkey, registered only while a game records.
     pub save_key: Mutex<Option<win::Hotkey>>,
 }

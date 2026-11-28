@@ -104,8 +104,11 @@ cd ffmpeg
     `# configure's name for "-f s16le" is pcm_s16le, and it ignores names it doesn't know` \
     --enable-demuxer=pcm_s16le --enable-decoder=pcm_s16le --enable-encoder=aac \
     --enable-filter=anull,aformat,aresample \
-    `# reading an .mp4 back: the app doesn't (the WebView plays clips), test-ffmpeg.ps1 does` \
-    --enable-demuxer=mov
+    `# reading an .mp4 back: for its thumbnail, and test-ffmpeg.ps1 checks clips with it` \
+    --enable-demuxer=mov \
+    `# a clip's thumbnail (the clip browser): one frame as a small JPEG. ffmpeg's own AV1 decoder only` \
+    `# decodes on the graphics card, which works out: a card that records AV1 also decodes it` \
+    --enable-encoder=mjpeg --enable-muxer=image2 --enable-decoder=av1 --enable-hwaccel=av1_d3d11va
 # configure leaves out a filter whose requirements fail without saying so. Stop here with the
 # reason, instead of shipping an ffmpeg that can't record the game window.
 if ! grep -q "CONFIG_GFXCAPTURE_FILTER 1" config_components.h; then # filters are here, not config.h
