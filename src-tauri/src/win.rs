@@ -379,9 +379,9 @@ pub mod tests {
     }
 
     /// Presses Ctrl+Alt+Shift+Win+`vk` with synthetic input, which global hotkeys react to.
-    fn press(vk: u16) {
+    fn press(vk: u16) -> bool {
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-            SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL, VK_LWIN, VK_MENU,
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL, VK_LWIN, VK_MENU,
             VK_SHIFT,
         };
         let key = |vk: u16, up: bool| INPUT {
@@ -395,8 +395,37 @@ pub mod tests {
         inputs.push(key(vk, false));
         inputs.push(key(vk, true));
         inputs.extend(mods.iter().rev().map(|&m| key(m, true)));
-        unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
+        send(&inputs)
+    }
+
+    /// Sends synthetic input and says whether Windows delivered it. Windows drops it without an error
+    /// while the desktop is locked or an elevated window (a game, say) has focus, so a test that
+    /// depends on it checks this first and skips with a reason instead of failing.
+    fn send(inputs: &[windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT]) -> bool {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, SendInput, INPUT, LASTINPUTINFO};
+        // Tests run in parallel: another test's input landing between the two readings would hide ours.
+        static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let last_input = || {
+            let mut info = LASTINPUTINFO { cbSize: size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+            unsafe { GetLastInputInfo(&mut info) };
+            info.dwTime
+        };
+        std::thread::sleep(std::time::Duration::from_millis(20)); // so delivered input moves the clock
+        let before = last_input();
+        let sent = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), size_of::<INPUT>() as i32) };
         std::thread::sleep(std::time::Duration::from_millis(300));
+        sent as usize == inputs.len() && last_input() != before
+    }
+
+    /// Skips the calling test, saying why, when synthetic input isn't reaching this desktop.
+    macro_rules! skip_without_input {
+        ($probe:expr) => {
+            if !$probe {
+                eprintln!("SKIPPED: Windows didn't deliver synthetic input (desktop locked, or an elevated window has focus)");
+                return;
+            }
+        };
     }
 
     /// Mouse events the listener has read, so a test can see it reads them only while watched.
@@ -405,19 +434,19 @@ pub mod tests {
     pub static MOUSE_SWITCH: Mutex<()> = Mutex::new(());
 
     /// Moves the mouse by nothing with synthetic input, which Raw Input still reports.
-    fn nudge_mouse() {
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT};
+    fn nudge_mouse() -> bool {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT};
         let input = INPUT {
             r#type: INPUT_MOUSE,
             Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: 0, dwFlags: MOUSEEVENTF_MOVE, time: 0, dwExtraInfo: 0 } },
         };
-        unsafe { SendInput(1, &input, size_of::<INPUT>() as i32) };
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        send(&[input])
     }
 
     #[test]
     fn reads_the_mouse_only_while_watched() {
         let _switch = MOUSE_SWITCH.lock().unwrap_or_else(|e| e.into_inner());
+        skip_without_input!(nudge_mouse());
         start_listener().unwrap();
         watch_mouse(true);
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -439,7 +468,7 @@ pub mod tests {
         let (a2, b2) = (a_hits.clone(), b_hits.clone());
         let a = Hotkey::register("Ctrl+Alt+Shift+Win+F23", move || { a2.fetch_add(1, Ordering::SeqCst); }).unwrap();
         let b = Hotkey::register("Ctrl+Alt+Shift+Win+F22", move || { b2.fetch_add(1, Ordering::SeqCst); }).unwrap();
-        press(VK_F1 + 22); // F23
+        skip_without_input!(press(VK_F1 + 22)); // F23
         press(VK_F1 + 21); // F22
         assert_eq!((a_hits.load(Ordering::SeqCst), b_hits.load(Ordering::SeqCst)), (1, 1), "both fire");
         drop(a);
