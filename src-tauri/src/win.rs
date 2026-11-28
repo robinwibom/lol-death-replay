@@ -371,26 +371,27 @@ pub mod tests {
 
     #[test]
     fn hotkeys_are_released_when_dropped() {
-        let combo = "Ctrl+Alt+Shift+Win+F24"; // unlikely to belong to anything else
+        let combo = "Ctrl+Alt+Shift+F24"; // unlikely to belong to anything else
         let key = Hotkey::register(combo, || {}).unwrap();
         assert!(Hotkey::register(combo, || {}).is_err(), "already ours");
         drop(key);
         assert!(Hotkey::register(combo, || {}).is_ok(), "free again straight away");
     }
 
-    /// Presses Ctrl+Alt+Shift+Win+`vk` with synthetic input, which global hotkeys react to.
+    /// Presses Ctrl+Alt+Shift+`vk` with synthetic input, which global hotkeys react to, and says
+    /// whether Windows delivered it (see `send`).
+    /// Not Win too: Ctrl+Alt+Shift+Win is Windows 11's Office key, which opens Microsoft 365 apps.
     fn press(vk: u16) -> bool {
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL, VK_LWIN, VK_MENU,
-            VK_SHIFT,
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL, VK_MENU, VK_SHIFT,
         };
         let key = |vk: u16, up: bool| INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
-                ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: if up { KEYEVENTF_KEYUP } else { 0 }, time: 0, dwExtraInfo: 0 },
+                ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: if up { KEYEVENTF_KEYUP } else { 0 }, time: 0, dwExtraInfo: OURS },
             },
         };
-        let mods = [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN];
+        let mods = [VK_CONTROL, VK_MENU, VK_SHIFT];
         let mut inputs: Vec<INPUT> = mods.iter().map(|&m| key(m, false)).collect();
         inputs.push(key(vk, false));
         inputs.push(key(vk, true));
@@ -398,31 +399,76 @@ pub mod tests {
         send(&inputs)
     }
 
-    /// Sends synthetic input and says whether Windows delivered it. Windows drops it without an error
-    /// while the desktop is locked or an elevated window (a game, say) has focus, so a test that
-    /// depends on it checks this first and skips with a reason instead of failing.
-    fn send(inputs: &[windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT]) -> bool {
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, SendInput, INPUT, LASTINPUTINFO};
-        // Tests run in parallel: another test's input landing between the two readings would hide ours.
-        static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
-        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-        let last_input = || {
-            let mut info = LASTINPUTINFO { cbSize: size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
-            unsafe { GetLastInputInfo(&mut info) };
-            info.dwTime
-        };
-        std::thread::sleep(std::time::Duration::from_millis(20)); // so delivered input moves the clock
-        let before = last_input();
-        let sent = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), size_of::<INPUT>() as i32) };
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        sent as usize == inputs.len() && last_input() != before
+    /// Marks the tests' synthetic input (its dwExtraInfo), so `send` can tell it from anyone else's.
+    const OURS: usize = 0x4C44_5254;
+    /// Our marked events the hooks in `send` have seen.
+    static SEEN: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "system" fn seen_key(code: i32, wparam: usize, lparam: isize) -> isize {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{CallNextHookEx, HC_ACTION, KBDLLHOOKSTRUCT};
+        if code == HC_ACTION as i32 && (*(lparam as *const KBDLLHOOKSTRUCT)).dwExtraInfo == OURS {
+            SEEN.fetch_add(1, Ordering::SeqCst);
+        }
+        CallNextHookEx(null_mut(), code, wparam, lparam)
     }
 
-    /// Skips the calling test, saying why, when synthetic input isn't reaching this desktop.
+    unsafe extern "system" fn seen_mouse(code: i32, wparam: usize, lparam: isize) -> isize {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{CallNextHookEx, HC_ACTION, MSLLHOOKSTRUCT};
+        if code == HC_ACTION as i32 && (*(lparam as *const MSLLHOOKSTRUCT)).dwExtraInfo == OURS {
+            SEEN.fetch_add(1, Ordering::SeqCst);
+        }
+        CallNextHookEx(null_mut(), code, wparam, lparam)
+    }
+
+    /// Sends synthetic input (marked `OURS`) and says whether Windows delivered all of it. Windows drops
+    /// it without an error while the desktop is locked or an elevated window (a game, say) has focus,
+    /// so a test that depends on it checks this and skips with a reason instead of failing. Low-level
+    /// hooks see each event as Windows takes it in; the mark keeps your own typing and mouse moves
+    /// from counting as ours.
+    fn send(inputs: &[windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT]) -> bool {
+        use std::time::Duration;
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            PeekMessageW, SetWindowsHookExW, UnhookWindowsHookEx, PM_REMOVE, WH_KEYBOARD_LL, WH_MOUSE_LL,
+        };
+        // Tests run in parallel: one test's marked input must not count as another's.
+        static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        SEEN.store(0, Ordering::SeqCst);
+        unsafe {
+            // Low-level hooks run on the thread that set them, while it reads its messages (below).
+            let hooks = [
+                SetWindowsHookExW(WH_KEYBOARD_LL, Some(seen_key), null_mut(), 0),
+                SetWindowsHookExW(WH_MOUSE_LL, Some(seen_mouse), null_mut(), 0),
+            ];
+            assert!(hooks.iter().all(|h| !h.is_null()), "can't watch for input: SetWindowsHookExW failed");
+            let sent = SendInput(inputs.len() as u32, inputs.as_ptr(), size_of::<INPUT>() as i32) as usize;
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while sent == inputs.len() && SEEN.load(Ordering::SeqCst) < inputs.len() && Instant::now() < deadline {
+                let mut msg: MSG = std::mem::zeroed();
+                while PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    DispatchMessageW(&msg);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            for hook in hooks {
+                UnhookWindowsHookEx(hook);
+            }
+        }
+        // The hooks see input before it's handed on: give the hotkey and Raw Input threads time to act on it.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        SEEN.load(Ordering::SeqCst) == inputs.len()
+    }
+
+    /// Skips the calling test, saying why, when synthetic input isn't reaching this desktop. On CI it
+    /// fails instead: `cargo test` shows a skipped test as passed, so a runner that stopped taking
+    /// input would otherwise stay green without testing anything.
     macro_rules! skip_without_input {
         ($probe:expr) => {
             if !$probe {
-                eprintln!("SKIPPED: Windows didn't deliver synthetic input (desktop locked, or an elevated window has focus)");
+                let why = "Windows didn't deliver synthetic input (desktop locked, or an elevated window has focus)";
+                assert!(std::env::var_os("CI").is_none(), "{why}; on CI that's a broken runner, not a reason to skip");
+                eprintln!("SKIPPED: {why}");
                 return;
             }
         };
@@ -433,30 +479,40 @@ pub mod tests {
     /// Held by tests that start or stop reading the mouse, which is one switch for the whole process.
     pub static MOUSE_SWITCH: Mutex<()> = Mutex::new(());
 
-    /// Moves the mouse by nothing with synthetic input, which Raw Input still reports.
+    /// Moves the mouse a pixel right and back with synthetic input, and says whether Windows delivered
+    /// it (see `send`). Not a move by nothing: Raw Input reports one, but the low-level hook `send`
+    /// watches with never sees it.
     fn nudge_mouse() -> bool {
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT};
-        let input = INPUT {
+        let step = |dx: i32| INPUT {
             r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: 0, dwFlags: MOUSEEVENTF_MOVE, time: 0, dwExtraInfo: 0 } },
+            Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy: 0, mouseData: 0, dwFlags: MOUSEEVENTF_MOVE, time: 0, dwExtraInfo: OURS } },
         };
-        send(&[input])
+        send(&[step(1), step(-1)])
     }
 
     #[test]
     fn reads_the_mouse_only_while_watched() {
         let _switch = MOUSE_SWITCH.lock().unwrap_or_else(|e| e.into_inner());
-        skip_without_input!(nudge_mouse());
+        skip_without_input!(nudge_mouse()); // before switching anything on, if this desktop takes no input
         start_listener().unwrap();
+        // Off again however the test ends, a skip included: the switch is shared with other tests.
+        struct Unwatch;
+        impl Drop for Unwatch {
+            fn drop(&mut self) {
+                watch_mouse(false);
+            }
+        }
+        let _unwatch = Unwatch;
         watch_mouse(true);
         std::thread::sleep(std::time::Duration::from_millis(100));
         let before = MOUSE_EVENTS.load(Ordering::SeqCst);
-        nudge_mouse();
+        skip_without_input!(nudge_mouse());
         assert!(MOUSE_EVENTS.load(Ordering::SeqCst) > before, "read while watched");
         watch_mouse(false);
         std::thread::sleep(std::time::Duration::from_millis(100));
         let stopped = MOUSE_EVENTS.load(Ordering::SeqCst);
-        nudge_mouse();
+        skip_without_input!(nudge_mouse());
         assert_eq!(MOUSE_EVENTS.load(Ordering::SeqCst), stopped, "not read once stopped");
     }
 
@@ -466,13 +522,13 @@ pub mod tests {
         use std::sync::Arc;
         let (a_hits, b_hits) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
         let (a2, b2) = (a_hits.clone(), b_hits.clone());
-        let a = Hotkey::register("Ctrl+Alt+Shift+Win+F23", move || { a2.fetch_add(1, Ordering::SeqCst); }).unwrap();
-        let b = Hotkey::register("Ctrl+Alt+Shift+Win+F22", move || { b2.fetch_add(1, Ordering::SeqCst); }).unwrap();
+        let a = Hotkey::register("Ctrl+Alt+Shift+F23", move || { a2.fetch_add(1, Ordering::SeqCst); }).unwrap();
+        let b = Hotkey::register("Ctrl+Alt+Shift+F22", move || { b2.fetch_add(1, Ordering::SeqCst); }).unwrap();
         skip_without_input!(press(VK_F1 + 22)); // F23
-        press(VK_F1 + 21); // F22
+        skip_without_input!(press(VK_F1 + 21)); // F22
         assert_eq!((a_hits.load(Ordering::SeqCst), b_hits.load(Ordering::SeqCst)), (1, 1), "both fire");
         drop(a);
-        press(VK_F1 + 21);
+        skip_without_input!(press(VK_F1 + 21));
         assert_eq!(b_hits.load(Ordering::SeqCst), 2, "the other still fires after one is dropped");
         drop(b);
     }
