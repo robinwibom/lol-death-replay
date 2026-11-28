@@ -278,6 +278,10 @@
       <label class="label" for="recordSound">Record game sound</label>
       <span class="switch"><input type="checkbox" id="recordSound"><span></span></span>
     </div>
+    <div class="row">
+      <label class="label" for="recordInputs">Record keys and clicks<span class="path">Shown over replays; never what you type in chat</span></label>
+      <span class="switch"><input type="checkbox" id="recordInputs"><span></span></span>
+    </div>
   </div>
 
   <h2>Clips</h2>
@@ -489,6 +493,7 @@
     $('saveClips').checked = settings.saveClips;
     $('dynamicClip').checked = settings.dynamicClip;
     $('recordSound').checked = settings.recordSound;
+    $('recordInputs').checked = settings.recordInputs;
     $('clipsDir').textContent = settings.clipsDir;
     $('clipsDir').title = settings.clipsDir;
   }
@@ -517,6 +522,7 @@
   $('saveClips').addEventListener('change', () => { settings.saveClips = $('saveClips').checked; saveSoon(); });
   $('dynamicClip').addEventListener('change', () => { settings.dynamicClip = $('dynamicClip').checked; saveSoon(); });
   $('recordSound').addEventListener('change', () => { settings.recordSound = $('recordSound').checked; saveSoon(); });
+  $('recordInputs').addEventListener('change', () => { settings.recordInputs = $('recordInputs').checked; saveSoon(); });
   $('startWithWindows').addEventListener('change', saveSoon);
   $('open').addEventListener('click', () => invoke('open_clips_folder'));
   $('log').addEventListener('click', () => invoke('open_log'));

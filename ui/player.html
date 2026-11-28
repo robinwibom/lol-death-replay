@@ -16,6 +16,7 @@
     --gold: #f5c542;
     --gold-dim: rgba(245, 197, 66, 0.45);
     --ease: cubic-bezier(0.23, 1, 0.32, 1);
+    --ease-move: cubic-bezier(0.77, 0, 0.175, 1);
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
@@ -244,6 +245,85 @@
   #speed-menu button[aria-checked="true"] { font-weight: 700; background: rgba(255, 255, 255, 0.1); }
   @keyframes pop { from { opacity: 0; transform: scale(0.95); } }
 
+  /* Keys and clicks saved with the clip (src-tauri/src/inputs.rs), drawn over the video: the
+     last few keys in the top left (the "shutter"), and a ripple where each click was. */
+  #inputs { position: absolute; inset: 0; pointer-events: none; display: none; }
+  body.has-inputs #inputs { display: block; }
+  body.inputs-off #inputs { display: none; }
+  #ripples { position: absolute; }
+  /* Placed and sized from the picture by drawKeys(): --k is a key's height. */
+  #shutter { position: absolute; --k: 24px; transition: transform 0.2s var(--ease); }
+  /* Out of the title's way while the controls show. */
+  body.show #shutter { transform: translateY(24px); }
+  .key {
+    --x: 0px;
+    --y: 0px;
+    position: absolute;
+    left: 0;
+    top: 0;
+    height: var(--k);
+    padding: 0 calc(var(--k) * 0.32);
+    border-radius: calc(var(--k) * 0.23);
+    display: flex;
+    align-items: center;
+    font-size: calc(var(--k) * 0.5);
+    font-weight: 700;
+    white-space: nowrap;
+    color: rgba(255, 255, 255, 0.92);
+    background: rgba(18, 18, 20, 0.72);
+    transform: translate(var(--x), var(--y));
+    /* Moving between slots is movement on screen: ease-in-out. Transitions, not keyframes, so a
+       quick run of presses retargets the slide instead of restarting it. */
+    transition: transform 0.2s var(--ease-move), opacity 0.25s ease, background-color 0.15s ease, color 0.15s ease;
+  }
+  /* Comes in from the left, growing from 92% out of a fade (never from nothing). */
+  @starting-style {
+    .key { opacity: 0; transform: translate(calc(var(--x) - var(--k) * 0.36), var(--y)) scale(0.92); }
+  }
+  /* Gold while held, on the instant it goes down (no transition: it marks the moment), back to
+     plain glass when let go. */
+  .key.on { background: var(--gold); color: #1c1c1e; transition: transform 0.2s var(--ease-move), opacity 0.25s ease; }
+  .key .mod { font-weight: 600; opacity: 0.65; font-size: 0.8em; margin-right: 0.25em; }
+  .key .n { font-weight: 600; opacity: 0.6; font-size: 0.8em; margin-left: 0.25em; display: inline-block; }
+  /* The last two slots step back, so the eye stays near the corner. */
+  .key.dim1 { opacity: 0.65; }
+  .key.dim2 { opacity: 0.35; }
+  /* Held keys pushed out of the row wait in a column at its end, marked off by a faint line that
+     rides on each of them (so it comes and goes with them). */
+  .key.pinned::before {
+    content: '';
+    position: absolute;
+    left: calc(var(--k) * -0.32);
+    top: calc(var(--k) * -0.09);
+    bottom: calc(var(--k) * -0.09);
+    width: 1px;
+    background: rgba(255, 255, 255, 0.28);
+  }
+  /* Leaving mirrors coming in: it carries on the way it was going, shrinks a little and blurs as
+     it fades, so it reads as one soft dissolve. Movement and blur start at once and settle (strong
+     ease-out); opacity has a soft tail. Pushed out by a new press is quicker than timing out. */
+  .key.pushed {
+    opacity: 0;
+    transform: translate(var(--x), var(--y)) scale(0.9);
+    filter: blur(4px);
+    transition: transform 0.26s var(--ease), opacity 0.22s ease, filter 0.22s var(--ease);
+  }
+  .key.expired {
+    opacity: 0;
+    transform: translate(calc(var(--x) + var(--k) * 0.32), var(--y)) scale(0.94);
+    filter: blur(3px);
+    transition: transform 0.34s var(--ease), opacity 0.3s ease, filter 0.3s var(--ease);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .key, .key.pushed, .key.expired { transition-property: opacity, background-color, color; transform: translate(var(--x), var(--y)); filter: none; }
+    @starting-style { .key { transform: translate(var(--x), var(--y)); } }
+  }
+  #inputs-btn { display: none; }
+  body.has-inputs #inputs-btn { display: grid; }
+  #inputs-btn .off { display: none; }
+  body.inputs-off #inputs-btn .on { display: none; }
+  body.inputs-off #inputs-btn .off { display: block; }
+
   /* Resize from any edge or corner; the window keeps the video's shape. */
   .edge { position: absolute; z-index: 10; touch-action: none; }
   .edge.n, .edge.s { left: 10px; right: 10px; height: 5px; cursor: ns-resize; }
@@ -261,6 +341,7 @@
 <body class="paused">
   <video id="video" preload="auto"></video>
   <div id="surface"></div>
+  <div id="inputs"><canvas id="ripples"></canvas><div id="shutter"></div></div>
 
   <div class="shade top"></div>
   <div class="shade bottom"></div>
@@ -299,6 +380,10 @@
     </div>
 
     <div class="group right">
+      <button id="inputs-btn" class="icon ctl" title="Keys and clicks on / off" aria-label="Keys and clicks on or off">
+        <svg class="on" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6.5 10h.01M10 10h.01M14 10h.01M17.5 10h.01M8 14h8"/></svg>
+        <svg class="off" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h10a2.5 2.5 0 0 1 2.5 2.5v7c0 .8-.4 1.6-1 2M17 18H5a2.5 2.5 0 0 1-2.5-2.5v-7A2.5 2.5 0 0 1 5 6"/><path d="M3 3l18 18"/></svg>
+      </button>
       <div class="sound">
         <div id="volume" class="slider ctl" title="Volume">
           <div class="track"><div class="fill"></div></div>
@@ -394,6 +479,255 @@
     }
   });
 
+  // ---- keys and clicks ----
+  // Saved beside the clip when "Record keys and clicks" is on; the format is described in
+  // src-tauri/src/inputs.rs. Everything is drawn from video.currentTime, so it follows seeking,
+  // pausing and slow motion by itself.
+  //
+  // Keys go in the "shutter", top left: the last MAX_KEYS presses in a row, newest in the corner.
+  // A new press comes in at the corner and pushes the rest along; the one past the end is pushed
+  // out, and keys fade on their own FADE seconds after they're let go. A key still held when it's
+  // pushed out (camera lock on Space, the scoreboard on Tab, a channel) isn't dropped: it jumps to
+  // a column at the end of the row and stays there, gold, until it's let go.
+  // Mouse 3 and up are usually bound to something (camera, a summoner), so they're keys here;
+  // left and right clicks are the ripples.
+  const MAX_KEYS = 5;   // keys in the row
+  const HELD_MAX = 3;   // keys in the held column
+  const FADE = 2.5;     // a key leaves this long (video seconds) after it's let go
+  const AGAIN = 0.6;    // the same key again within this long counts up (A ×3) instead of taking a slot
+  const TAP = 0.1;      // a key stays lit at least this long (video seconds), so a quick tap shows
+  const RIPPLE = 0.45;  // how long a click's ripple lasts (video seconds)
+  const MODS = ['Shift', 'Ctrl', 'Alt'];
+  const MOUSE_KEYS = { middle: 'M3', mouse4: 'M4', mouse5: 'M5' };
+  const CLICK_COLORS = { left: '245, 197, 66', right: '76, 194, 127' };
+  let inputs = null;    // { strokes, clicks, els: Map(stroke id -> element), last: time last drawn }
+  const ripples = $('ripples');
+  const ink = ripples.getContext('2d');
+
+  // Strokes: what the shutter shows, one per press, in order.
+  // - From [from, to) spans of each key held (and of chat being open, shown as a held "Chat").
+  // - Shift, Ctrl and Alt fold into the key pressed while they were held (⇧E), and only show on
+  //   their own if nothing was pressed under them.
+  // - The same thing pressed again within AGAIN seconds adds a press to the last stroke (A ×3),
+  //   so attack-move spam doesn't push everything else out.
+  function readInputs(events) {
+    const spans = [], downAt = new Map(), clicks = [];
+    let chatFrom = null;
+    const add = (k, from, to) => spans.push({ k, from, to: Math.max(to, from + TAP) });
+    for (const e of events) {
+      if ('key' in e) {
+        if (e.down && !downAt.has(e.key)) downAt.set(e.key, e.t);
+        else if (!e.down && downAt.has(e.key)) { add(e.key, downAt.get(e.key), e.t); downAt.delete(e.key); }
+      } else if ('button' in e) {
+        if (MOUSE_KEYS[e.button]) add(MOUSE_KEYS[e.button], e.t, e.t);
+        else clicks.push(e);
+      } else if ('chat' in e) {
+        if (e.chat && chatFrom === null) chatFrom = e.t;
+        else if (!e.chat && chatFrom !== null) { add('Chat', chatFrom, e.t); chatFrom = null; }
+      }
+    }
+    for (const [k, from] of downAt) add(k, from, Infinity); // still held when the clip ends
+    if (chatFrom !== null) add('Chat', chatFrom, Infinity);
+    spans.sort((a, b) => a.from - b.from);
+
+    const isMod = (s) => MODS.includes(s.k);
+    const strokes = [];
+    for (const s of spans) {
+      if (isMod(s) && spans.some((o) => !isMod(o) && o.from >= s.from && o.from < s.to)) continue;
+      const mods = isMod(s) ? [] : spans.filter((m) => isMod(m) && m.from <= s.from && s.from < m.to).map((m) => m.k);
+      const label = [...mods, s.k].join('+');
+      const last = strokes[strokes.length - 1];
+      if (last && last.label === label && s.from - last.presses[last.presses.length - 1][0] < AGAIN) {
+        last.presses.push([s.from, s.to]);
+      } else {
+        strokes.push({ id: strokes.length, label, mods, k: s.k, presses: [[s.from, s.to]] });
+      }
+    }
+    return { strokes, clicks };
+  }
+
+  function showInputs(data) {
+    inputs = { ...readInputs(data.events || []), els: new Map(), last: null };
+    body.classList.add('has-inputs');
+  }
+
+  call('player_inputs', { clip: params.get('clip') })
+    .then((text) => text && showInputs(JSON.parse(text)))
+    .catch((e) => uiLog(`can't read the clip's keys and clicks (${e})`));
+
+  // Where the picture is inside the video element (letterboxed if the shapes differ).
+  function picture() {
+    const W = video.clientWidth, H = video.clientHeight;
+    const vw = video.videoWidth || W, vh = video.videoHeight || H;
+    const s = Math.min(W / vw, H / vh);
+    return { x: (W - vw * s) / 2, y: (H - vh * s) / 2, w: vw * s, h: vh * s };
+  }
+
+  // ---- the shutter ----
+  // Worked out from the time alone: which strokes show is a function of t, and CSS transitions
+  // animate the difference from the last frame. So it follows seeking, pausing and slow motion.
+  const shutter = $('shutter');
+  const pressedBy = (s, t) => s.presses.filter(([from]) => from <= t);
+  const isHeld = (s, t) => s.presses.some(([from, to]) => t >= from && t < to);
+  // When it was last let go, so far (a key still held stays on screen).
+  const letGoAt = (s, t) => Math.max(...pressedBy(s, t).map(([, to]) => Math.min(to, video.duration || to)));
+
+  function keyEl(s) {
+    const e = document.createElement('div');
+    e.className = 'key';
+    for (const m of s.mods) {
+      const mod = document.createElement('span');
+      mod.className = 'mod';
+      mod.textContent = m === 'Shift' ? '⇧' : m;
+      e.append(mod);
+    }
+    e.append(s.k);
+    e.n = document.createElement('span');
+    e.n.className = 'n';
+    e.append(e.n);
+    return e;
+  }
+
+  function updateKey(e, s, t) {
+    const n = pressedBy(s, t).length;
+    const count = n > 1 ? `×${n}` : '';
+    if (e.n.textContent !== count) {
+      e.n.textContent = count;
+      // A small bump from 0.8, not from 0: "again", not an announcement.
+      if (n > 1) e.n.animate([{ transform: 'scale(0.8)', opacity: 0.4 }, { transform: 'none' }], { duration: 160, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' });
+    }
+    e.classList.toggle('on', isHeld(s, t));
+  }
+
+  // Plays the key's exit, then takes it out of the page. Whatever made it leave, it isn't held
+  // any more, so it goes plain as it fades.
+  function retire(id, e, how) {
+    if (e.retired) return;
+    e.retired = true;
+    e.classList.remove('on');
+    e.classList.add(how);
+    setTimeout(() => {
+      e.remove();
+      if (inputs.els.get(id) === e) inputs.els.delete(id);
+    }, 450);
+  }
+
+  function drawKeys(t, r) {
+    // A jump (seeking, or the window coming back from the background) rebuilds the row where it
+    // belongs instead of sliding everything across from where it was.
+    if (inputs.last === null || t < inputs.last - 0.001 || t - inputs.last > 0.5) {
+      shutter.replaceChildren();
+      inputs.els.clear();
+    }
+    inputs.last = t;
+
+    // Sized and placed from the picture: keys scale with it, within reason.
+    const k = clamp(r.w * 0.022, 13, 30);
+    shutter.style.setProperty('--k', `${k}px`);
+    shutter.style.left = `${r.x + Math.max(10, r.w * 0.012)}px`;
+    shutter.style.top = `${r.y + Math.max(8, r.h * 0.02)}px`;
+    const gap = k * 0.14, rowH = k * 1.18;
+
+    const started = inputs.strokes.filter((s) => s.presses[0][0] <= t);
+    const kept = started.slice(-MAX_KEYS);
+    const keptIds = new Set(kept.map((s) => s.id));
+    const row = kept.filter((s) => t < letGoAt(s, t) + FADE);
+    const held = started.filter((s) => !keptIds.has(s.id) && isHeld(s, t)).slice(-HELD_MAX);
+    const shown = new Set([...row, ...held].map((s) => s.id));
+
+    for (const [id, e] of inputs.els) {
+      if (shown.has(id)) continue;
+      if (e.inRow && !keptIds.has(id)) {
+        // Pushed out by a newer press: carries on one slot as it fades.
+        e.style.setProperty('--x', `${e.x + e.offsetWidth + gap}px`);
+        retire(id, e, 'pushed');
+      } else {
+        retire(id, e, 'expired'); // timed out, or let go in the held column
+      }
+    }
+
+    const place = (s, x, y) => {
+      let e = inputs.els.get(s.id);
+      if (e && e.retired) { e.remove(); e = null; }
+      if (!e) {
+        e = keyEl(s);
+        // Set before it's in the page, so it comes in where it belongs.
+        e.style.setProperty('--x', `${x}px`);
+        e.style.setProperty('--y', `${y}px`);
+        shutter.append(e);
+        inputs.els.set(s.id, e);
+      }
+      updateKey(e, s, t);
+      e.x = x;
+      e.style.setProperty('--x', `${x}px`);
+      e.style.setProperty('--y', `${y}px`);
+      return e;
+    };
+
+    // The row: newest in the corner, older ones pushed to the right.
+    let x = 0;
+    row.slice().reverse().forEach((s, i) => {
+      const e = place(s, x, 0);
+      e.inRow = true;
+      e.classList.remove('pinned');
+      e.classList.toggle('dim1', i === MAX_KEYS - 2);
+      e.classList.toggle('dim2', i === MAX_KEYS - 1);
+      x += e.offsetWidth + gap;
+    });
+
+    // The held column, at a fixed spot past where a full row ends, so a key jumps to a place the
+    // eye can learn; only a row wider than that pushes it further right. Keys stack down in the
+    // order they joined, so one joining never moves the others.
+    const colX = Math.max(k * 1.68 * MAX_KEYS, x + k * 0.55);
+    held.forEach((s, i) => {
+      const e = place(s, colX, i * rowH);
+      e.inRow = false;
+      e.classList.remove('dim1', 'dim2');
+      e.classList.add('pinned');
+    });
+  }
+
+  function drawInputs(t) {
+    if (!inputs || body.classList.contains('inputs-off')) return;
+    const r = picture(), dpr = devicePixelRatio || 1;
+    drawKeys(t, r);
+
+    const w = Math.round(r.w * dpr), h = Math.round(r.h * dpr);
+    if (ripples.width !== w || ripples.height !== h) {
+      Object.assign(ripples.style, { left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` });
+      ripples.width = w;
+      ripples.height = h;
+    }
+    ink.clearRect(0, 0, w, h);
+    for (const c of inputs.clicks) {
+      const age = t - c.t;
+      if (age < 0 || age >= RIPPLE) continue;
+      const p = age / RIPPLE, fade = 1 - p * p;
+      const x = c.x * w, y = c.y * h, size = h / 200;
+      const color = CLICK_COLORS[c.button] || '255, 255, 255';
+      // A dark halo keeps it visible over a bright game.
+      ink.shadowColor = `rgba(0, 0, 0, ${0.7 * fade})`;
+      ink.shadowBlur = 3 * dpr;
+      ink.lineWidth = Math.max(1.5 * dpr, size * 0.45);
+      ink.strokeStyle = `rgba(${color}, ${fade})`;
+      ink.beginPath();
+      ink.arc(x, y, size * (1.2 + 3.8 * Math.sqrt(p)), 0, Math.PI * 2);
+      ink.stroke();
+      ink.fillStyle = `rgba(${color}, ${fade * 0.9})`;
+      ink.beginPath();
+      ink.arc(x, y, size * 0.6, 0, Math.PI * 2);
+      ink.fill();
+    }
+  }
+
+  // Hidden or shown with its button; remembered for the next replay.
+  body.classList.toggle('inputs-off', localStorage.getItem('inputs') === 'off');
+  $('inputs-btn').addEventListener('click', () => {
+    const off = !body.classList.contains('inputs-off');
+    body.classList.toggle('inputs-off', off);
+    localStorage.setItem('inputs', off ? 'off' : 'on');
+  });
+
   (function render() {
     const d = video.duration || 0;
     const p = d ? video.currentTime / d : 0;
@@ -403,6 +737,7 @@
       body.classList.toggle('inzone', p >= zoneStart);
     }
     $('time').textContent = `${fmt(video.currentTime)} / ${fmt(d)}`;
+    drawInputs(video.currentTime);
     requestAnimationFrame(render);
   })();
 

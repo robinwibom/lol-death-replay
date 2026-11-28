@@ -73,6 +73,16 @@ pub fn is_dead(players: &Value, names: &HashSet<String>) -> bool {
     find_player(players, names).and_then(|p| p.get("isDead")).and_then(Value::as_bool) == Some(true)
 }
 
+/// Seconds until the local player respawns, while they're dead. Game seconds, so it holds still
+/// while the game is paused.
+pub fn respawn_in(players: &Value, names: &HashSet<String>) -> Option<f64> {
+    let me = find_player(players, names)?;
+    if me.get("isDead").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    me.get("respawnTimer").and_then(Value::as_f64)
+}
+
 /// Something with a name to show ("Miss Fortune") and one for file names ("MissFortune").
 pub struct Named {
     pub display: String,
@@ -242,6 +252,18 @@ mod tests {
         assert!(!is_dead(&players, &names));
         let players = serde_json::json!([{ "riotIdGameName": "Robin", "isDead": true }]);
         assert!(is_dead(&players, &names));
+    }
+
+    #[test]
+    fn reads_respawn_timer_only_while_dead() {
+        let names = my_names(&serde_json::json!({ "riotId": "Robin#EUW" }));
+        let players = serde_json::json!([
+            { "riotId": "Other#EUW", "isDead": true, "respawnTimer": 3.0 },
+            { "riotId": "Robin#EUW", "isDead": true, "respawnTimer": 12.5 },
+        ]);
+        assert_eq!(respawn_in(&players, &names), Some(12.5));
+        let players = serde_json::json!([{ "riotId": "Robin#EUW", "isDead": false, "respawnTimer": 0.0 }]);
+        assert_eq!(respawn_in(&players, &names), None);
     }
 
     fn kill(t: f64, killer: &str, victim: &str, assisters: &[&str]) -> Value {

@@ -39,11 +39,11 @@ fetch() { # fetch <url> <ref> <dir>
     [ -d "$3" ] || git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$2" "$1" "$3"
 }
 
-# --- NVIDIA (h264_nvenc): headers only, the driver is loaded at runtime ---
+# --- NVIDIA (av1_nvenc, h264_nvenc): headers only, the driver is loaded at runtime ---
 fetch https://github.com/FFmpeg/nv-codec-headers.git "$NV_HEADERS_VERSION" nv-codec-headers
 make -C nv-codec-headers PREFIX="$PREFIX" install >/dev/null
 
-# --- AMD (h264_amf): headers only ---
+# --- AMD (av1_amf, h264_amf): headers only ---
 if [ ! -d "$PREFIX/include/AMF" ]; then
     rm -rf amf
     git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$AMF_VERSION" \
@@ -53,7 +53,7 @@ if [ ! -d "$PREFIX/include/AMF" ]; then
     cp -r amf/amf/public/include "$PREFIX/include/AMF"
 fi
 
-# --- Intel (h264_qsv): the libvpl dispatcher, which finds the GPU runtime at runtime ---
+# --- Intel (av1_qsv, h264_qsv): the libvpl dispatcher, which finds the GPU runtime at runtime ---
 if [ ! -f "$PREFIX/lib/libvpl.a" ]; then
     fetch https://github.com/intel/libvpl.git "$LIBVPL_VERSION" libvpl
     cmake -S libvpl -B libvpl/build -DCMAKE_BUILD_TYPE=Release \
@@ -87,18 +87,19 @@ cd ffmpeg
     --enable-w32threads \
     `# hardware: GPU encoders + the D3D11 capture path` \
     --enable-ffnvcodec --enable-nvenc --enable-amf --enable-libvpl --enable-d3d11va --enable-libx264 \
-    --enable-encoder=h264_nvenc,h264_amf,h264_qsv,libx264 \
+    `# AV1 first on graphics cards that have it (RTX 40+, RX 7000+, Arc), H.264 otherwise` \
+    --enable-encoder=av1_nvenc,av1_amf,av1_qsv,h264_nvenc,h264_amf,h264_qsv,libx264 \
     `# capture: gfxcapture (the game window), ddagrab (the monitor) and gdigrab ("Compatible");` \
     `# color is the encoder probe's test input` \
     --enable-indev=gdigrab,lavfi \
     `# their frames arrive "encoded": lavfi as wrapped_avframe, gdigrab as bmp` \
     --enable-decoder=wrapped_avframe,bmp \
     --enable-filter=gfxcapture,ddagrab,hwdownload,format,scale,color,null \
-    `# recording: rolling .ts segments` \
-    --enable-muxer=segment,mpegts,null \
-    `# saving a clip: concat the segments, copy into .mp4` \
-    --enable-protocol=file,pipe,concat --enable-demuxer=mpegts --enable-muxer=mp4 \
-    --enable-decoder=h264 --enable-parser=h264 --enable-bsf=extract_extradata,h264_mp4toannexb \
+    `# recording: Matroska into a pipe, which the app keeps in memory (null: the tests decode clips into it)` \
+    --enable-muxer=matroska,null \
+    `# saving a clip: the app pipes the Matroska back in, ffmpeg copies it into .mp4` \
+    --enable-protocol=file,pipe --enable-demuxer=matroska --enable-muxer=mp4 \
+    --enable-decoder=h264 --enable-parser=h264,av1 --enable-bsf=extract_extradata \
     `# a clip's sound: raw PCM from the app (audio.rs), converted and encoded to AAC.` \
     `# configure's name for "-f s16le" is pcm_s16le, and it ignores names it doesn't know` \
     --enable-demuxer=pcm_s16le --enable-decoder=pcm_s16le --enable-encoder=aac \
@@ -111,6 +112,13 @@ if ! grep -q "CONFIG_GFXCAPTURE_FILTER 1" config_components.h; then # filters ar
     echo "gfxcapture was left out (see configure's warning above, and ffbuild/config.log)" >&2
     exit 1
 fi
+# The same for the AV1 encoders, which need recent enough NVIDIA, AMD and Intel headers.
+for enc in AV1_NVENC AV1_AMF AV1_QSV; do
+    if ! grep -q "CONFIG_${enc}_ENCODER 1" config_components.h; then
+        echo "$enc was left out (see configure's output, and ffbuild/config.log)" >&2
+        exit 1
+    fi
+done
 make -j "$JOBS" >/dev/null
 $HOST-strip ffmpeg.exe
 

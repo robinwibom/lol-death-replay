@@ -1,4 +1,4 @@
-//! Rolling screen recording: ffmpeg streams MPEG-TS into this process, which keeps the last stretch
+//! Rolling screen recording: ffmpeg streams Matroska into this process, which keeps the last stretch
 //! of it in memory. Nothing touches the disk until a clip is saved. The game's sound is kept beside
 //! it (audio.rs) and joined to the video only in saved clips.
 
@@ -19,21 +19,40 @@ use windows_sys::Win32::System::JobObjects::{
 
 use crate::audio;
 use crate::audio_ring;
+use crate::inputs;
 use crate::settings::Settings;
-use crate::ts::{self, TS_HZ, TS_PACKET, VIDEO_PID};
+use crate::mkv::{self, MKV_HZ};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Extra seconds kept beyond the longest clip, so there's always a keyframe (one a second) to start at.
 const KEEP_MARGIN: f64 = 3.0;
-const HW_ENCODERS: [&str; 3] = ["h264_nvenc", "h264_amf", "h264_qsv"];
-/// How the recording leaves ffmpeg: MPEG-TS on stdout, each packet passed on as soon as it's made.
-const TO_PIPE: [&str; 6] = ["-an", "-flush_packets", "1", "-f", "mpegts", "pipe:1"];
+/// AV1 encoders: the same quality in smaller clips (and a smaller buffer), on NVIDIA RTX 40+,
+/// AMD RX 7000+ and Intel Arc / Core Ultra. Tried first unless H.264 is forced.
+const AV1_ENCODERS: [&str; 3] = ["av1_nvenc", "av1_amf", "av1_qsv"];
+/// H.264 encoders: for older graphics cards, and for clips that must play everywhere.
+const H264_ENCODERS: [&str; 3] = ["h264_nvenc", "h264_amf", "h264_qsv"];
+/// How the recording leaves ffmpeg: Matroska on stdout (it carries any codec), one cluster per
+/// frame so each frame is passed on as soon as the next one is made. See mkv.rs.
+const TO_PIPE: [&str; 10] =
+    ["-an", "-flush_packets", "1", "-f", "matroska", "-cluster_size_limit", "0", "-write_crc32", "0", "pipe:1"];
 
-/// Constant quality 27 on every encoder: about 38% smaller than 23, and hard to tell apart in
-/// League (each step up is ~11% smaller). It sets both clip size and the memory the buffer takes.
+/// Constant quality 27 on every H.264 encoder: about 38% smaller than 23, and hard to tell apart
+/// in League (each step up is ~11% smaller). It sets both clip size and the memory the buffer takes.
+///
+/// AV1's scales differ: av1_nvenc's CQ 33-36 looked like h264_nvenc's 26-29 (the same VMAF), so
+/// 27 becomes 34. av1_amf takes AV1's own 0-255 quantizer, about 4 times the 0-63 one (34 -> 136).
+/// av1_qsv's -global_quality is its ICQ level on the same 1-51 scale as H.264's, so it gets 34 too.
+///
+/// `-delay 0` stops NVENC holding frames back before handing them out (by default ~10 frames for
+/// H.264 and ~21 for AV1 at 30 fps). A clip's start is timed by when frames arrive here
+/// (`Ring::capture_origin`), so every frame held back made the sound start that much early: about
+/// 1 s with AV1 in a real game.
 fn encoder_args(encoder: &str) -> &'static [&'static str] {
     match encoder {
-        "h264_nvenc" => &["-preset", "p4", "-rc", "vbr", "-cq", "27"],
+        "av1_nvenc" => &["-preset", "p4", "-rc", "vbr", "-cq", "34", "-delay", "0"],
+        "av1_amf" => &["-quality", "speed", "-rc", "cqp", "-qp_i", "136", "-qp_p", "136"],
+        "av1_qsv" => &["-preset", "veryfast", "-global_quality", "34"],
+        "h264_nvenc" => &["-preset", "p4", "-rc", "vbr", "-cq", "27", "-delay", "0"],
         "h264_amf" => &["-quality", "speed", "-rc", "cqp", "-qp_i", "27", "-qp_p", "27"],
         "h264_qsv" => &["-preset", "veryfast", "-global_quality", "27"],
         "libx264" => &["-preset", "ultrafast", "-crf", "27", "-tune", "zerolatency"],
@@ -106,20 +125,28 @@ fn ffmpeg(path: &Path) -> Command {
     cmd
 }
 
+/// Whether `encoder` runs on this PC with the arguments recording gives it, into the same
+/// container: an encoder can exist and still refuse a rate control mode or quality value.
 fn encoder_works(ffmpeg_exe: &Path, encoder: &str) -> bool {
     ffmpeg(ffmpeg_exe)
         .args(["-loglevel", "error", "-f", "lavfi", "-i", "color=s=256x256:d=0.2"])
-        .args(["-vf", "format=nv12", "-c:v", encoder, "-f", "null", "-"])
+        .args(["-vf", "format=nv12", "-c:v", encoder])
+        .args(encoder_args(encoder))
+        .args(["-f", "matroska", "-"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
 }
 
+/// The encoders to try, best first: AV1 on the GPU, then H.264 on the GPU.
+fn candidates() -> impl Iterator<Item = &'static str> {
+    AV1_ENCODERS.iter().chain(&H264_ENCODERS).copied()
+}
+
 /// The first GPU encoder that works on this PC, falling back to the CPU (libx264).
 pub fn pick_encoder(ffmpeg_exe: &Path) -> String {
-    HW_ENCODERS
-        .into_iter()
+    candidates()
         .find(|enc| encoder_works(ffmpeg_exe, enc))
         .unwrap_or("libx264")
         .to_string()
@@ -136,13 +163,12 @@ pub fn next_capture(capture: &str) -> Option<&'static str> {
 
 // ---- The in-memory buffer ----
 
-/// A stretch of the stream from one PAT (the table a reader needs before anything else, which
-/// ffmpeg sends about every 0.1s and right before each keyframe) up to the next one.
+/// One Matroska cluster: with `-cluster_size_limit 0`, one frame.
 struct Chunk {
     at: Instant,
-    /// Holds the start of a keyframe, so a clip can start with this chunk.
+    /// Starts with a keyframe, so a clip can start with this chunk.
     key: bool,
-    /// The timestamp of the first frame that starts in this chunk, and when it arrived here.
+    /// The timestamp of the first frame in this chunk, and when it arrived here.
     frame: Option<(u64, Instant)>,
     bytes: Vec<u8>,
 }
@@ -151,43 +177,57 @@ struct Chunk {
 struct Cut {
     stream: Vec<u8>,
     first_frame_at: Option<Instant>,
+    /// A line for the log on how the frames' timing looked (see `Ring::timing`).
+    timing: Option<String>,
 }
 
-/// The last `keep` of the MPEG-TS stream, cut into chunks that start where a reader can join in.
+/// The Matroska stream's header and its last `keep` of clusters. A clip is the header followed by
+/// the clusters from a keyframe on: to a reader, a stream that started there.
 struct Ring {
+    /// Everything before the first cluster: the EBML header, the Segment's start, Info and Tracks.
+    header: Vec<u8>,
     chunks: VecDeque<Chunk>,
-    /// A packet cut off by the end of the last read, finished by the next one.
+    /// An element cut off by the end of the last read, finished by a later one.
     partial: Vec<u8>,
     keep: Duration,
 }
 
 impl Ring {
     fn new(keep: Duration) -> Self {
-        Self { chunks: VecDeque::new(), partial: Vec::new(), keep }
+        Self { header: Vec::new(), chunks: VecDeque::new(), partial: Vec::new(), keep }
     }
 
     /// Adds what ffmpeg just wrote, then forgets chunks older than `keep`.
     fn push(&mut self, data: &[u8], now: Instant) {
         self.partial.extend_from_slice(data);
-        let whole = self.partial.len() / TS_PACKET * TS_PACKET;
-        for packet in self.partial[..whole].as_chunks::<TS_PACKET>().0 {
-            let pid = ts::pid(packet);
-            if pid == 0 || self.chunks.is_empty() {
-                self.chunks.push_back(Chunk { at: now, key: false, frame: None, bytes: Vec::new() });
-            }
-            let chunk = self.chunks.back_mut().unwrap();
-            if pid == VIDEO_PID {
-                // An adaptation field with the random access indicator set: how ffmpeg marks keyframes.
-                if packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x40 != 0 {
-                    chunk.key = true;
+        let mut done = 0;
+        while let Some(e) = mkv::element(&self.partial[done..]) {
+            // The Segment holds everything else, so its size is unknown on a pipe: keep its header,
+            // and read what's in it element by element. (ffmpeg finishes each cluster before
+            // writing it, so clusters always have a size.)
+            let Some(size) = e.size.filter(|_| e.id != mkv::SEGMENT).and_then(|s| usize::try_from(s).ok()) else {
+                if self.chunks.is_empty() {
+                    self.header.extend_from_slice(&self.partial[done..done + e.header_len]);
                 }
-                if chunk.frame.is_none() {
-                    chunk.frame = ts::frame_pts(packet).map(|pts| (pts, now));
-                }
-            }
-            chunk.bytes.extend_from_slice(packet);
+                done += e.header_len;
+                continue;
+            };
+            let end = done.saturating_add(e.header_len).saturating_add(size);
+            let Some(bytes) = self.partial.get(done..end) else { break }; // not all here yet
+            if e.id == mkv::CLUSTER {
+                let frame = mkv::first_frame(&bytes[e.header_len..]);
+                self.chunks.push_back(Chunk {
+                    at: now,
+                    key: frame.key,
+                    frame: frame.pts.map(|pts| (pts, now)),
+                    bytes: bytes.to_vec(),
+                });
+            } else if self.chunks.is_empty() {
+                self.header.extend_from_slice(bytes);
+            } // else the index ffmpeg writes when it stops: not needed
+            done = end;
         }
-        self.partial.drain(..whole);
+        self.partial.drain(..done);
         while self.chunks.front().is_some_and(|c| now.duration_since(c.at) > self.keep) {
             self.chunks.pop_front();
         }
@@ -198,13 +238,15 @@ impl Ring {
     /// Frames are stamped from the capture's first frame, a moment ffmpeg doesn't report, but each
     /// arrives here a little after it was captured (converting, encoding, the pipe). So of all the
     /// frames kept, the one that came through fastest gives the closest answer: arrival minus
-    /// timestamp is smallest for it. That's within a few milliseconds of the real capture time,
-    /// and as the oldest frames are forgotten the answer follows any slow drift between clocks.
+    /// timestamp is smallest for it. As the oldest frames are forgotten the answer follows any slow
+    /// drift between clocks. It is late by the pipeline's fastest delay, which nothing here can
+    /// see: a few frames at best, so an encoder must not hold frames back (`-delay 0` on NVENC).
+    /// Each frame of delay is a frame of sound too early in clips.
     fn capture_origin(&self) -> Option<Instant> {
         self.chunks
             .iter()
             .filter_map(|c| c.frame)
-            .filter_map(|(pts, at)| at.checked_sub(Duration::from_secs_f64(pts as f64 / TS_HZ)))
+            .filter_map(|(pts, at)| at.checked_sub(Duration::from_secs_f64(pts as f64 / MKV_HZ)))
             .min()
     }
 
@@ -222,11 +264,43 @@ impl Ring {
         let first_frame_at = self
             .capture_origin()
             .zip(first_pts)
-            .map(|(origin, pts)| origin + Duration::from_secs_f64(pts as f64 / TS_HZ));
-        Cut {
-            stream: self.chunks.range(start..).flat_map(|c| c.bytes.iter().copied()).collect(),
-            first_frame_at,
+            .map(|(origin, pts)| origin + Duration::from_secs_f64(pts as f64 / MKV_HZ));
+        if start == self.chunks.len() {
+            return Cut { stream: Vec::new(), first_frame_at: None, timing: None }; // no keyframe yet: nothing to save
         }
+        let clusters = self.chunks.range(start..).flat_map(|c| c.bytes.iter().copied());
+        let timing = self.timing(start);
+        Cut { stream: self.header.iter().copied().chain(clusters).collect(), first_frame_at, timing }
+    }
+
+    /// For the log: how the frames' timestamps line up with when they arrived, to tell where a clip's
+    /// sound and video drift apart. "Late" is arrival minus timestamp, above the fastest frame kept
+    /// (the one `capture_origin` goes by). Growing over the buffer means the timestamps run slower
+    /// than the clock, or frames queue up before they reach us; either way the clip is timed too
+    /// early and its sound plays late by about the clip's lateness. A delay every frame shares
+    /// doesn't show here: it makes the sound early instead (see `capture_origin`).
+    fn timing(&self, start: usize) -> Option<String> {
+        let late = |c: &Chunk| c.frame.map(|(pts, at)| (pts as f64 / MKV_HZ, at));
+        let frames: Vec<(f64, Instant)> = self.chunks.iter().filter_map(late).collect();
+        let (first, last) = (frames.first()?, frames.last()?);
+        let origin = self.capture_origin()?;
+        let ms = |(pts, at): (f64, Instant)| {
+            (at.duration_since(origin).as_secs_f64() - pts) * 1000.0
+        };
+        let clip: Vec<f64> = self.chunks.range(start..).filter_map(late).map(ms).collect();
+        let (lo, hi) = clip.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        Some(format!(
+            "Clip timing: frames {:.0}-{:.0} ms late (first {:.0}, last {:.0}); buffer: {} frames, \
+             timestamps cover {:.2}s in {:.2}s of arrivals, oldest {:.0} ms late",
+            lo,
+            hi,
+            clip.first()?,
+            clip.last()?,
+            frames.len(),
+            last.0 - first.0,
+            last.1.duration_since(first.1).as_secs_f64(),
+            ms(*first),
+        ))
     }
 }
 
@@ -258,6 +332,8 @@ pub struct Recorder {
     errors: Arc<Mutex<Vec<u8>>>,
     /// The game's sound, unless it's turned off.
     sound: Option<audio::Capture>,
+    /// Keys and clicks, when they're recorded (inputs.rs).
+    inputs: Option<inputs::Capture>,
 }
 
 impl Recorder {
@@ -319,6 +395,7 @@ impl Recorder {
         let to_errors = errors.clone();
         std::thread::spawn(move || keep_tail(stderr, to_errors, 1500));
         let sound = s.record_sound.then(|| audio::Capture::start(crate::win::league_process(), keep));
+        let inputs = s.record_inputs.then(|| inputs::Capture::start(keep, inputs::Area::of_capture(capture)));
 
         crate::log(&format!(
             "Recording started ({capture}, {encoder}, {} fps, {}p, {}, keeping the last {:.0}s in memory)",
@@ -327,7 +404,7 @@ impl Recorder {
             if sound.is_some() { "with sound" } else { "no sound" },
             keep.as_secs_f64()
         ));
-        Ok(Self { ffmpeg: ffmpeg_exe.to_path_buf(), capture, child: Mutex::new(Some(child)), ring, errors, sound })
+        Ok(Self { ffmpeg: ffmpeg_exe.to_path_buf(), capture, child: Mutex::new(Some(child)), ring, errors, sound, inputs })
     }
 
     /// Whether the sound being recorded is all the speakers' sound, not just the game's (voice chat
@@ -365,8 +442,13 @@ impl Recorder {
     }
 
     /// Saves about the last `seconds` as an .mp4, from the keyframe just before (so up to a second more).
+    /// With keys and clicks recorded, they're saved beside it (inputs.rs).
     pub fn save_last(&self, seconds: f64, out: &Path) -> Result<(), String> {
-        let cut = self.ring.lock().unwrap().since_keyframe_before(seconds, Instant::now());
+        let now = Instant::now();
+        let cut = self.ring.lock().unwrap().since_keyframe_before(seconds, now);
+        if let Some(timing) = &cut.timing {
+            crate::log(timing);
+        }
         let sound = match (&self.sound, cut.first_frame_at) {
             (Some(sound), Some(starts)) => Some(sound.since(starts)),
             (Some(_), None) => {
@@ -376,7 +458,10 @@ impl Recorder {
             (None, _) => None,
         };
         // Empty when nothing was heard yet: no sound track rather than a silent one.
-        save_stream(&self.ffmpeg, cut.stream, sound.filter(|s| !s.is_empty()).as_deref(), out)
+        save_stream(&self.ffmpeg, cut.stream, sound.filter(|s| !s.is_empty()).as_deref(), out)?;
+        // Timed from the same first frame as the sound.
+        inputs::save_beside(self.inputs.as_ref(), cut.first_frame_at, now, out);
+        Ok(())
     }
 }
 
@@ -402,7 +487,7 @@ fn sound_file(sound: &[i16]) -> Result<TempFile, String> {
     Ok(file)
 }
 
-/// Turns MPEG-TS bytes into an .mp4 without re-encoding the video, adding `sound` (heard from the
+/// Turns Matroska bytes into an .mp4 without re-encoding the video, adding `sound` (heard from the
 /// video's first frame on) as AAC.
 fn save_stream(ffmpeg_exe: &Path, stream: Vec<u8>, sound: Option<&[i16]>, out: &Path) -> Result<(), String> {
     if stream.is_empty() {
@@ -410,7 +495,7 @@ fn save_stream(ffmpeg_exe: &Path, stream: Vec<u8>, sound: Option<&[i16]>, out: &
     }
     let sound = sound.map(sound_file).transpose()?;
     let mut cmd = ffmpeg(ffmpeg_exe);
-    cmd.args(["-loglevel", "error", "-y", "-f", "mpegts", "-i", "pipe:0"]);
+    cmd.args(["-loglevel", "error", "-y", "-f", "matroska", "-i", "pipe:0"]);
     if let Some(file) = &sound {
         let (rate, channels) = (audio_ring::RATE.to_string(), audio_ring::CHANNELS.to_string());
         cmd.args(["-f", "s16le", "-ar", &rate, "-ac", &channels, "-i"]).arg(&file.0);
@@ -454,31 +539,43 @@ mod tests {
         assert_eq!(next_capture("gdigrab"), None);
     }
 
-    use crate::ts::test_support::{packet, with_pts, Kind::*};
+    use crate::mkv::test_support::{cluster, header};
 
     #[test]
-    fn ring_keeps_recent_chunks_starting_at_keyframes() {
+    fn ring_keeps_recent_frames_and_cuts_at_keyframes() {
         let t0 = Instant::now();
         let at = |s: f64| t0 + Duration::from_secs_f64(s);
         let mut ring = Ring::new(Duration::from_secs(5));
-        // Every second: PAT + keyframe + video. Every half second between: PAT + video.
-        for i in 0..10 {
+        ring.push(&header(), t0);
+        // Two frames a second: a keyframe on each second, another frame half a second later.
+        for i in 0..10u32 {
             let s = f64::from(i);
-            ring.push(&[packet(Pat), packet(Key), packet(Video)].concat(), at(s));
-            ring.push(&[packet(Pat), packet(Video)].concat(), at(s + 0.5));
+            ring.push(&cluster(u64::from(i) * 1000, true), at(s));
+            ring.push(&cluster(u64::from(i) * 1000 + 500, false), at(s + 0.5));
         }
-        // Chunks more than 5s older than the newest (9.5) are gone, so 4.5 is the oldest left.
+        // Frames more than 5s older than the newest (9.5) are gone, so 4.5 is the oldest left.
         assert_eq!(ring.chunks.front().unwrap().at, at(4.5));
+        assert_eq!(ring.header, header()); // kept, though it's older
 
-        // The last 2s from 9.5: the keyframe at 7.0 is the last one at or before 7.5, so the chunks
-        // from 7, 7.5, 8, 8.5, 9 and 9.5: three of 3 packets and three of 2.
+        // The last 2s from 9.5: the keyframe at 7.0 is the last one at or before 7.5, so the
+        // header and then the frames from 7, 7.5, 8, 8.5, 9 and 9.5.
+        let frames = |from: u64| (from..10).flat_map(|i| [cluster(i * 1000, true), cluster(i * 1000 + 500, false)]);
         let last = ring.since_keyframe_before(2.0, at(9.5)).stream;
-        assert_eq!(last.len(), 15 * TS_PACKET);
-        assert_eq!(&last[..TS_PACKET], &packet(Pat)[..]); // starts at the PAT before the keyframe
-        assert_eq!(&last[TS_PACKET..2 * TS_PACKET], &packet(Key)[..]);
+        assert_eq!(last, [header()].into_iter().chain(frames(7)).collect::<Vec<_>>().concat());
 
-        // More than is kept: from the oldest keyframe (5.0), skipping 4.5 which has none.
-        assert_eq!(ring.since_keyframe_before(60.0, at(9.5)).stream.len(),5 * 5 * TS_PACKET); // 5 seconds of 5 packets
+        // More than is kept: from the oldest keyframe (5.0), skipping 4.5 which isn't one.
+        let all = ring.since_keyframe_before(60.0, at(9.5)).stream;
+        assert_eq!(all, [header()].into_iter().chain(frames(5)).collect::<Vec<_>>().concat());
+    }
+
+    #[test]
+    fn nothing_to_cut_before_the_first_keyframe() {
+        let now = Instant::now();
+        let mut ring = Ring::new(Duration::from_secs(5));
+        ring.push(&header(), now);
+        assert!(ring.since_keyframe_before(1.0, now).stream.is_empty());
+        ring.push(&cluster(0, false), now);
+        assert!(ring.since_keyframe_before(1.0, now).stream.is_empty());
     }
 
     #[test]
@@ -486,29 +583,42 @@ mod tests {
         let t0 = Instant::now();
         let at = |s: f64| t0 + Duration::from_secs_f64(s);
         let mut ring = Ring::new(Duration::from_secs(5));
+        ring.push(&header(), t0);
         // Frames 1/30 s apart, from a capture that started at t0 + 5 ms, arriving 25, 5 and 20 ms late.
-        ring.push(&[packet(Pat), with_pts(packet(Key), 90_000)].concat(), at(1.030));
-        ring.push(&[packet(Pat), with_pts(packet(Video), 93_000)].concat(), at(1.005 + 1.0 / 30.0 + 0.005));
-        ring.push(&[packet(Pat), with_pts(packet(Key), 96_000)].concat(), at(1.005 + 2.0 / 30.0 + 0.020));
+        ring.push(&cluster(1000, true), at(0.005 + 1.000 + 0.025));
+        ring.push(&cluster(1033, false), at(0.005 + 1.033 + 0.005));
+        ring.push(&cluster(1067, true), at(0.005 + 1.067 + 0.020));
         // The fastest frame says the capture started at 5 + 5 = 10 ms: off by its 5 ms of latency.
         let origin = ring.capture_origin().unwrap();
         assert!((origin.duration_since(t0).as_secs_f64() - 0.010).abs() < 1e-6);
         // A clip from the last keyframe starts at its timestamp after that.
         let cut = ring.since_keyframe_before(0.0, at(1.1));
-        assert_eq!(cut.stream.len(), 2 * TS_PACKET);
+        assert_eq!(cut.stream, [header(), cluster(1067, true)].concat());
         let starts = cut.first_frame_at.unwrap().duration_since(t0).as_secs_f64();
-        assert!((starts - (0.010 + 96_000.0 / TS_HZ)).abs() < 1e-6, "{starts}");
+        assert!((starts - (0.010 + 1.067)).abs() < 1e-6, "{starts}");
+        // The clip's one frame came 15 ms slower than the fastest; the oldest kept, 20 ms.
+        let timing = cut.timing.unwrap();
+        assert!(timing.contains("frames 15-15 ms late") && timing.contains("oldest 20 ms late"), "{timing}");
     }
 
     #[test]
-    fn ring_joins_packets_split_across_reads() {
-        let mut ring = Ring::new(Duration::from_secs(5));
-        let data = [packet(Pat), packet(Key)].concat();
+    fn ring_joins_elements_split_across_reads() {
         let now = Instant::now();
-        ring.push(&data[..100], now);
-        ring.push(&data[100..300], now);
-        ring.push(&data[300..], now);
-        assert_eq!(ring.since_keyframe_before(0.0, now).stream, data);
+        let data = [header(), cluster(0, true), cluster(33, false)].concat();
+        // Cut anywhere, even inside an element's id or size, it reads the same.
+        for cut in 1..data.len() {
+            let mut ring = Ring::new(Duration::from_secs(5));
+            ring.push(&data[..cut], now);
+            ring.push(&data[cut..], now);
+            assert_eq!(ring.since_keyframe_before(0.0, now).stream, data, "cut at {cut}");
+        }
+    }
+
+    #[test]
+    fn av1_comes_before_h264_unless_forced() {
+        let all: Vec<_> = candidates().collect();
+        assert_eq!(all, ["av1_nvenc", "av1_amf", "av1_qsv", "h264_nvenc", "h264_amf", "h264_qsv"]);
+        assert!(all.iter().all(|e| !encoder_args(e).is_empty()));
     }
 
     /// Records a few seconds through the real ffmpeg, the way a game is, and saves the end of it.
@@ -544,6 +654,7 @@ mod tests {
         )
         .to_string();
         assert!(!crate::mp4::has_sound(&out));
+        assert_keyframe_first_and_fast_start(&out);
         std::fs::remove_file(&out).unwrap();
         let count: u32 = frames.rsplit("frame=").next().unwrap().split_whitespace().next().unwrap().parse().unwrap();
         assert!((60..=95).contains(&count), "{count} frames");
@@ -558,5 +669,55 @@ mod tests {
         std::fs::remove_file(&out).unwrap();
         let info = String::from_utf8_lossy(&info.stderr);
         assert!(info.contains("Audio: aac") && info.contains("48000 Hz, stereo"), "{info}");
+    }
+
+    /// An .mp4 whose first frame is a keyframe (the first entry of its sync sample table is
+    /// sample 1) and whose index comes before the video (`+faststart`), so it plays while loading.
+    fn assert_keyframe_first_and_fast_start(clip: &Path) {
+        let bytes = std::fs::read(clip).unwrap();
+        let find = |name: &[u8]| bytes.windows(4).position(|w| w == name).unwrap();
+        assert!(find(b"moov") < find(b"mdat"), "the index isn't at the start");
+        // stss: version and flags, the number of entries, then the first keyframe's sample number.
+        let stss = find(b"stss") + 4;
+        assert_eq!(u32::from_be_bytes(bytes[stss + 8..stss + 12].try_into().unwrap()), 1, "starts before a keyframe");
+    }
+
+    /// Like the test above, with each AV1 encoder that works on this PC and the arguments the game
+    /// is recorded with. Needs a graphics card that encodes AV1; skipped when none does.
+    #[test]
+    #[ignore]
+    fn saves_an_av1_clip_from_memory() {
+        let exe = Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries/ffmpeg-x86_64-pc-windows-msvc.exe");
+        let working: Vec<_> = AV1_ENCODERS.into_iter().filter(|enc| encoder_works(&exe, enc)).collect();
+        if working.is_empty() {
+            eprintln!("No AV1 encoder works on this PC - skipped");
+        }
+        for encoder in working {
+            let mut child = ffmpeg(&exe)
+                .args(["-loglevel", "error", "-re", "-f", "lavfi", "-i", "color=c=red:s=1280x720:r=30:d=4"])
+                .args(["-vf", "format=nv12", "-c:v", encoder])
+                .args(encoder_args(encoder))
+                .args(["-g", "30"])
+                .args(TO_PIPE)
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let ring = Mutex::new(Ring::new(Duration::from_secs(10)));
+            fill(&ring, child.stdout.take().unwrap());
+            child.wait().unwrap();
+            let ring = ring.into_inner().unwrap();
+
+            let out = std::env::temp_dir().join(format!("ring_test_{encoder}_{}.mp4", std::process::id()));
+            let tone = vec![0i16; audio_ring::RATE as usize * 2 * 3];
+            save_stream(&exe, ring.since_keyframe_before(2.0, Instant::now()).stream, Some(&tone), &out).unwrap();
+            let copied = ffmpeg(&exe).args(["-i"]).arg(&out).args(["-c", "copy", "-f", "null", "-"]).output().unwrap();
+            assert_keyframe_first_and_fast_start(&out);
+            assert!(crate::mp4::has_sound(&out));
+            std::fs::remove_file(&out).unwrap();
+            let info = String::from_utf8_lossy(&copied.stderr);
+            assert!(copied.status.success() && info.contains("Video: av1"), "{encoder}: {info}");
+            let count: u32 = info.rsplit("frame=").next().unwrap().split_whitespace().next().unwrap().parse().unwrap();
+            assert!((60..=95).contains(&count), "{encoder}: {count} frames");
+        }
     }
 }

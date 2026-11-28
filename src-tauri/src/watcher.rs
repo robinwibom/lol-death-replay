@@ -10,9 +10,9 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager};
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 
-use crate::live_client::{champion, find_killer, last_fight, find_player, is_dead, my_names, LiveClient};
+use crate::live_client::{champion, find_killer, last_fight, find_player, is_dead, my_names, respawn_in, LiveClient};
 use crate::recorder::{ffmpeg_path, next_capture, pick_encoder, remove_stale_segments, Recorder};
-use crate::{player, set_status, settings, toast, win, AppState};
+use crate::{inputs, player, set_status, settings, toast, win, AppState};
 
 pub fn run(app: AppHandle) {
     remove_stale_segments(); // safe here: single-instance means no other copy is recording
@@ -24,6 +24,7 @@ pub fn run(app: AppHandle) {
     let mut names = HashSet::new();
     let mut game_folder: Option<PathBuf> = None; // where this game's clips go, decided once per game
     let mut was_dead = false;
+    let mut close_on_respawn = false; // dead, and the replay closes before respawning
     let mut shown_all_sound = false; // whether the status currently says the sound is all sound
     let mut failed = false; // don't retry recording until the next game
     let mut idle = false; // in a game, but replay and clips are both turned off
@@ -63,6 +64,7 @@ pub fn run(app: AppHandle) {
             }
             idle = false;
             let encoder = if s.encoder == "auto" {
+                // Picked once: testing the encoders takes a moment.
                 auto_encoder.get_or_insert_with(|| pick_encoder(&ffmpeg)).clone()
             } else {
                 s.encoder.clone()
@@ -113,12 +115,25 @@ pub fn run(app: AppHandle) {
             continue;
         }
 
-        let dead = client.get("playerlist").is_some_and(|p| is_dead(&p, &names));
+        // A missed answer says nothing: taking it as alive would close the replay early, and the
+        // next answer would look like a new death.
+        let Some(players) = client.get("playerlist") else {
+            thread::sleep(Duration::from_millis(250));
+            continue;
+        };
+        let dead = is_dead(&players, &names);
         if dead && !was_dead {
             crate::log("You died - saving replay...");
             let (app, r, names) = (app.clone(), r.clone(), names.clone());
             let folder = game_folder.clone().unwrap_or_default();
             thread::spawn(move || handle_death(app, r, names, folder));
+            close_on_respawn = true;
+        }
+        // Out of the way a moment before you can move again. Respawning is the backstop, for a
+        // timer that skips past the mark (a revive, say).
+        if close_on_respawn && respawning(&players, &names) {
+            player::close(&app);
+            close_on_respawn = false;
         }
         was_dead = dead;
         thread::sleep(Duration::from_millis(250));
@@ -201,7 +216,11 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
         Ok(()) => {
             crate::log(&format!("Saved {} (killed by {killer})", out.display()));
             *app.state::<AppState>().last_clip.lock().unwrap() = Some(out.clone());
-            if s.auto_play {
+            // A short death timer can run out while the clip saves: it's kept, but not shown.
+            let too_late = client.get("playerlist").is_some_and(|p| respawning(&p, &names));
+            if too_late && s.auto_play {
+                crate::log("Respawned before the replay was ready - not showing it");
+            } else if s.auto_play {
                 player::show(&app, &out, &format!("Death at {min}:{sec:02} - killed by {killer}"), since_death);
             }
             if s.save_clips {
@@ -212,6 +231,14 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
         }
         Err(e) => crate::log(&format!("Clip save failed: {e}")),
     }
+}
+
+/// How long before respawning the replay closes, in seconds.
+const CLOSE_BEFORE_RESPAWN: f64 = 1.0;
+
+/// Whether the local player is about to respawn or already has: time for the replay to go.
+fn respawning(players: &Value, names: &HashSet<String>) -> bool {
+    !is_dead(players, names) || respawn_in(players, names).is_some_and(|t| t <= CLOSE_BEFORE_RESPAWN)
 }
 
 /// How much later than `after` a death's event can still be this death's: a poll (0.25s), the API
@@ -304,9 +331,10 @@ fn move_into_day_folders(dir: &Path) {
     let mut moved = 0;
     for path in entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()) {
         let Some((day, game)) = path.file_name().and_then(|n| n.to_str()).and_then(old_game_folder) else { continue };
-        // The clips folder may be one the user keeps other things in: only clips folders move.
+        // The clips folder may be one the user keeps other things in: only clips folders move
+        // (clips, and the keys and clicks saved beside them).
         let only_clips = std::fs::read_dir(&path).is_ok_and(|mut files| {
-            files.all(|f| f.is_ok_and(|f| f.path().is_file() && f.path().extension().is_some_and(|x| x == "mp4")))
+            files.all(|f| f.is_ok_and(|f| f.path().is_file() && is_clip_file(&f.path())))
         });
         let to = dir.join(day).join(game);
         if !only_clips || to.exists() {
@@ -322,7 +350,13 @@ fn move_into_day_folders(dir: &Path) {
     }
 }
 
-/// "2026-11-21_2130_Jinx_SR" -> ("2026-11-21", "2130_Jinx_SR"); None for any other name.
+/// A clip, or the inputs saved beside one.
+fn is_clip_file(path: &Path) -> bool {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    name.ends_with(".mp4") || name.ends_with(".inputs.json")
+}
+
+/// "2026-11-21_2130_Jinx_SR" ->("2026-11-21", "2130_Jinx_SR"); None for any other name.
 fn old_game_folder(name: &str) -> Option<(&str, &str)> {
     let b = name.as_bytes();
     let digits = |from: usize, to: usize| b.get(from..to).is_some_and(|d| d.iter().all(u8::is_ascii_digit));
@@ -407,7 +441,12 @@ fn prune(dir: &Path, max_bytes: u64, newest: &Path) {
         if path == current {
             continue;
         }
-        let removed = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+        // A game folder holds its clips' inputs too; a single clip has its own beside it.
+        let removed = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path).inspect(|()| drop(std::fs::remove_file(inputs::sidecar(&path))))
+        };
         if removed.is_ok() {
             total -= size;
             if let Some(day) = path.parent().filter(|day| *day != dir) {
@@ -471,6 +510,7 @@ mod tests {
         };
         put("2026-11-21_2130_Jinx_SR/12m40s_by-Ahri.mp4");
         put("2026-11-21_2210_Lux_ARAM/01m00s_saved.mp4");
+        put("2026-11-21_2210_Lux_ARAM/01m00s_saved.inputs.json"); // a clip's inputs move with it
         put("2026-11-22_0900_Jinx_SR/03m00s_by-Vi.mp4");
         put("2026-11-22_1200_photos_trip/beach.jpg"); // not ours: has something besides clips
         put("2026-11-23_1000_Ezreal_SR/05m00s_by-Vi.mp4"); // its new place is already taken
@@ -478,7 +518,7 @@ mod tests {
 
         move_into_day_folders(&dir);
         for moved in ["2026-11-21/2130_Jinx_SR/12m40s_by-Ahri.mp4", "2026-11-21/2210_Lux_ARAM/01m00s_saved.mp4",
-            "2026-11-22/0900_Jinx_SR/03m00s_by-Vi.mp4"] {
+            "2026-11-21/2210_Lux_ARAM/01m00s_saved.inputs.json", "2026-11-22/0900_Jinx_SR/03m00s_by-Vi.mp4"] {
             assert!(dir.join(moved).exists(), "{moved}");
         }
         assert!(!dir.join("2026-11-21_2130_Jinx_SR").exists());
@@ -534,6 +574,11 @@ mod tests {
             path
         };
         let loose = make(&dir, "old.mp4");
+        let other = dir.join("other.inputs.json"); // another clip's inputs: not the loose clip's
+        for inputs in [inputs::sidecar(&loose), other.clone(), inputs::sidecar(&games[0].join("a.mp4"))] {
+            std::fs::create_dir_all(inputs.parent().unwrap()).unwrap();
+            std::fs::write(inputs, "{}").unwrap();
+        }
         make(&games[0], "a.mp4");
         make(&games[0], "b.mp4");
         make(&games[1], "a.mp4");
@@ -546,6 +591,8 @@ mod tests {
         prune(&dir, 250, &newest);
         assert!(!loose.exists() && !games[0].exists() && !games[1].exists());
         assert!(newest.exists());
+        // The loose clip's inputs went with it (game folders' go with the folder).
+        assert!(!inputs::sidecar(&loose).exists() && other.exists());
 
         // The current game is kept even when it alone is over the limit.
         prune(&dir, 0, &newest);

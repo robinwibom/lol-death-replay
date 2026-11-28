@@ -25,6 +25,8 @@ pub struct Settings {
     pub fps: u32,
     /// Record the game's sound into clips.
     pub record_sound: bool,
+    /// Record keys and clicks while the game is in front, for the replay's inputs overlay (inputs.rs).
+    pub record_inputs: bool,
     /// Recording height in pixels; 0 records at the monitor's native size.
     pub height: u32,
     /// Not in the settings window: the main display is recorded unless settings.json says otherwise.
@@ -33,7 +35,8 @@ pub struct Settings {
     /// game window (gfxcapture) when it can, else the whole monitor (ddagrab); the app moves down
     /// that list, then to gdigrab, by itself for the rest of a game when one fails.
     pub capture: String,
-    /// "auto" or a specific ffmpeg encoder such as "h264_nvenc".
+    /// "auto" (AV1 where the graphics card encodes it, else H.264) or a specific ffmpeg encoder
+    /// such as "h264_nvenc". Only in settings.json, for clips that must play where AV1 doesn't.
     pub encoder: String,
     /// Pop up the replay window after each death.
     pub auto_play: bool,
@@ -59,6 +62,7 @@ impl Default for Settings {
             dynamic_clip: false,
             fps: 30,
             record_sound: true,
+            record_inputs: false,
             height: 1080,
             monitor: 0,
             capture: "ddagrab".into(),

@@ -1,10 +1,10 @@
 //! The floating replay window (ui/player.html).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
-use crate::{mp4, settings, win};
+use crate::{inputs, mp4, settings, win};
 
 const LABEL: &str = "player";
 
@@ -117,6 +117,12 @@ pub fn player_resize(window: WebviewWindow, width: f64, height: f64, anchor: Str
         window.set_position(PhysicalPosition::new(moved.x, moved.y)).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// The keys and clicks saved beside `clip` (its .inputs.json, see inputs.rs), if there are any.
+#[tauri::command]
+pub fn player_inputs(clip: PathBuf) -> Option<String> {
+    std::fs::read_to_string(inputs::sidecar(&clip)).ok()
 }
 
 /// Matches the window's height to the video's aspect ratio.

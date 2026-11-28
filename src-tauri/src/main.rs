@@ -3,13 +3,14 @@
 
 mod audio;
 mod audio_ring;
+mod inputs;
 mod live_client;
+mod mkv;
 mod mp4;
 mod player;
 mod recorder;
 mod settings;
 mod toast;
-mod ts;
 mod updater;
 mod watcher;
 mod win;
@@ -325,6 +326,7 @@ fn main() {
             player::player_close,
             player::player_resize,
             player::player_fit,
+            player::player_inputs,
         ])
         .setup(setup)
         .build(tauri::generate_context!())
