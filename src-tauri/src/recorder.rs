@@ -522,6 +522,37 @@ fn save_stream(ffmpeg_exe: &Path, stream: Vec<u8>, sound: Option<&[i16]>, out: &
     written.map_err(|e| e.to_string())
 }
 
+/// How wide a clip's thumbnail is, in pixels; its height keeps the video's shape.
+const THUMBNAIL_WIDTH: u32 = 320;
+
+/// Saves the frame `from_end` seconds before the end of `clip` as a small JPEG at `out`, for the
+/// clip browser. Decodes only from the keyframe before that point, so it takes a moment.
+/// H.264 decodes in software. AV1 can't (ffmpeg's own AV1 decoder has no software path), so when
+/// that fails it's tried again on the graphics card: one that recorded AV1 also decodes it.
+pub fn save_thumbnail(ffmpeg_exe: &Path, clip: &Path, out: &Path, from_end: f64) -> Result<(), String> {
+    thumbnail_with(ffmpeg_exe, clip, out, from_end, &[])
+        .or_else(|first| thumbnail_with(ffmpeg_exe, clip, out, from_end, &["-hwaccel", "d3d11va"]).map_err(|_| first))
+}
+
+fn thumbnail_with(ffmpeg_exe: &Path, clip: &Path, out: &Path, from_end: f64, decode: &[&str]) -> Result<(), String> {
+    let _ = std::fs::remove_file(out); // so a failed try can't leave an old one looking new
+    let result = ffmpeg(ffmpeg_exe)
+        .args(["-loglevel", "error", "-y"])
+        .args(decode)
+        .args(["-sseof", &format!("-{from_end:.2}"), "-i"])
+        .arg(clip)
+        .args(["-frames:v", "1", "-vf", &format!("scale={THUMBNAIL_WIDTH}:-2"), "-q:v", "5", "-f", "image2"])
+        .arg(out)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !result.status.success() || !out.exists() {
+        let err = String::from_utf8_lossy(&result.stderr);
+        return Err(err.chars().rev().take(300).collect::<Vec<_>>().into_iter().rev().collect());
+    }
+    Ok(())
+}
+
 impl Drop for Recorder {
     fn drop(&mut self) {
         self.stop();
@@ -655,6 +686,11 @@ mod tests {
         .to_string();
         assert!(!crate::mp4::has_sound(&out));
         assert_keyframe_first_and_fast_start(&out);
+        // Its thumbnail: a JPEG (it starts with FF D8), from a second before the end.
+        let thumb = out.with_extension("jpg");
+        save_thumbnail(&exe, &out, &thumb, 1.0).unwrap();
+        assert_eq!(std::fs::read(&thumb).unwrap()[..2], [0xFF, 0xD8]);
+        std::fs::remove_file(&thumb).unwrap();
         std::fs::remove_file(&out).unwrap();
         let count: u32 = frames.rsplit("frame=").next().unwrap().split_whitespace().next().unwrap().parse().unwrap();
         assert!((60..=95).contains(&count), "{count} frames");

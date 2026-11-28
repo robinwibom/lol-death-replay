@@ -10,9 +10,11 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager};
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 
-use crate::live_client::{champion, find_killer, last_fight, find_player, is_dead, my_names, respawn_in, LiveClient};
-use crate::recorder::{ffmpeg_path, next_capture, pick_encoder, remove_stale_segments, Recorder};
-use crate::{inputs, player, set_status, settings, toast, win, AppState};
+use crate::live_client::{
+    champion, find_assisters, find_killer, find_player, game_result, is_dead, last_fight, my_names, respawn_in, LiveClient,
+};
+use crate::recorder::{ffmpeg_path, next_capture, pick_encoder, remove_stale_segments, save_thumbnail, Recorder};
+use crate::{game, inputs, player, set_status, settings, toast, win, AppState};
 
 pub fn run(app: AppHandle) {
     remove_stale_segments(); // safe here: single-instance means no other copy is recording
@@ -22,7 +24,10 @@ pub fn run(app: AppHandle) {
     let mut auto_encoder: Option<String> = None;
     let mut rec: Option<Arc<Recorder>> = None;
     let mut names = HashSet::new();
-    let mut game_folder: Option<PathBuf> = None; // where this game's clips go, decided once per game
+    // Where this game's clips go and what's known about it, decided once per game.
+    let mut game: Option<game::Current> = None;
+    let mut result_saved = false; // the game's result is in its game.json
+    let mut polls: u32 = 0;
     let mut was_dead = false;
     let mut close_on_respawn = false; // dead, and the replay closes before respawning
     let mut shown_all_sound = false; // whether the status currently says the sound is all sound
@@ -40,7 +45,7 @@ pub fn run(app: AppHandle) {
                 set_status(&app, "Waiting for game");
             }
             (failed, idle, fallback) = (false, false, None);
-            game_folder = None;
+            (game, result_saved) = (None, false);
             thread::sleep(Duration::from_secs(2));
             continue;
         };
@@ -71,13 +76,13 @@ pub fn run(app: AppHandle) {
             };
             names = my_names(&active);
             crate::log(&format!("Game found - playing as {}", names.iter().min().map_or("?", |n| n)));
-            if game_folder.is_none() {
-                game_folder = Some(current_game_folder(&client, &names));
+            if game.is_none() {
+                game = Some(current_game(&client, &names));
             }
             match Recorder::start(&ffmpeg, &s, &encoder) {
                 Ok(r) => {
                     let r = Arc::new(r);
-                    set_recording(&app, Some((r.clone(), game_folder.clone().unwrap_or_default())));
+                    set_recording(&app, Some((r.clone(), game.clone().unwrap_or_default())));
                     shown_all_sound = r.all_sound();
                     set_status(&app, recording_status(shown_all_sound));
                     rec = Some(r);
@@ -125,8 +130,8 @@ pub fn run(app: AppHandle) {
         if dead && !was_dead {
             crate::log("You died - saving replay...");
             let (app, r, names) = (app.clone(), r.clone(), names.clone());
-            let folder = game_folder.clone().unwrap_or_default();
-            thread::spawn(move || handle_death(app, r, names, folder));
+            let game = game.clone().unwrap_or_default();
+            thread::spawn(move || handle_death(app, r, names, game));
             close_on_respawn = true;
         }
         // Out of the way a moment before you can move again. Respawning is the backstop, for a
@@ -136,6 +141,16 @@ pub fn run(app: AppHandle) {
             close_on_respawn = false;
         }
         was_dead = dead;
+        // The result only shows in the few seconds between the nexus falling and the game closing,
+        // so it's looked for every 2 seconds (the events are a bigger answer than the player list).
+        polls = polls.wrapping_add(1);
+        if !result_saved && polls.is_multiple_of(8) {
+            if let (Some(result), Some((folder, _))) = (game_result(client.get("eventdata").as_ref()), &game) {
+                crate::log(&format!("Game ended: {result}"));
+                game::set_result(&settings::current(&app).clips_dir.join(folder), &result);
+                result_saved = true;
+            }
+        }
         thread::sleep(Duration::from_millis(250));
     }
 }
@@ -151,35 +166,44 @@ fn recording_status(all_sound: bool) -> &'static str {
 }
 
 /// Where the game being played keeps its clips, inside the clips folder: its day's folder, then
-/// its own, e.g. "2026-11-21\2130_Jinx_ARAM".
-fn current_game_folder(client: &LiveClient, names: &HashSet<String>) -> PathBuf {
+/// its own, e.g. "2026-11-21\2130_Jinx_ARAM". With what its game.json starts with.
+fn current_game(client: &LiveClient, names: &HashSet<String>) -> game::Current {
     let stats = client.get("gamestats");
     let stat = |key: &str| stats.as_ref().and_then(|g| g.get(key).cloned());
     let game_time = stat("gameTime").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let mode = stat("gameMode").and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-    let champ = client
-        .get("playerlist")
-        .and_then(|p| find_player(&p, names).and_then(champion))
-        .map_or_else(|| "Unknown".to_string(), |c| c.file);
+    let mode = short_mode(&stat("gameMode").and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default());
+    let champ = client.get("playerlist").and_then(|p| find_player(&p, names).and_then(champion));
+    let (display, file) = champ.map_or_else(|| ("Unknown".to_string(), "Unknown".to_string()), |c| (c.display, c.file));
     // When the game started, not when we noticed it, so starting the app mid-game names it the same.
     let started = win::local_time(SystemTime::now() - Duration::from_secs_f64(game_time.max(0.0)));
-    game_folder(&started, &champ, &mode)
+    let info = game::Info { champion: display, mode: mode.clone(), started: iso_time(&started) };
+    (game_folder(&started, &file, &mode), info)
 }
 
-/// A game that runs past midnight stays in the day it started.
-fn game_folder(t: &SYSTEMTIME, champion: &str, mode: &str) -> PathBuf {
-    let mode = match mode {
+/// The game modes' short names, as folders and game.json use them.
+fn short_mode(mode: &str) -> String {
+    match mode {
         "CLASSIC" => "SR",
         "CHERRY" => "Arena",
         "PRACTICETOOL" => "Practice",
         "" => "Unknown",
         other => other,
-    };
+    }
+    .to_string()
+}
+
+/// "2026-11-21T21:30:05", local time.
+fn iso_time(t: &SYSTEMTIME) -> String {
+    format!("{}-{:02}-{:02}T{:02}:{:02}:{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
+}
+
+/// A game that runs past midnight stays in the day it started.
+fn game_folder(t: &SYSTEMTIME, champion: &str, mode: &str) -> PathBuf {
     let day = format!("{}-{:02}-{:02}", t.wYear, t.wMonth, t.wDay);
     Path::new(&day).join(safe(&format!("{:02}{:02}_{champion}_{mode}", t.wHour, t.wMinute)))
 }
 
-fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game_folder: PathBuf) {
+fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, (game_folder, info): game::Current) {
     let s = settings::current(&app);
     thread::sleep(Duration::from_secs_f64(s.after)); // capture the death itself
     if !rec.alive() {
@@ -187,7 +211,9 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
     }
     let client = LiveClient::new();
     let events = client.get("eventdata");
-    let killer = find_killer(events.as_ref(), client.get("playerlist").as_ref(), &names);
+    let players = client.get("playerlist");
+    let killer = find_killer(events.as_ref(), players.as_ref(), &names);
+    let assisters = find_assisters(events.as_ref(), players.as_ref(), &names);
     let now = game_seconds(&client);
     // How long ago the death happened, on the game clock: it's noticed up to a poll late, and the
     // calls above take time too, so it's a little more than `after`. A latest death further back
@@ -211,7 +237,7 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
         crate::log(&format!("Couldn't create {}: {e}", dir.display()));
         return;
     }
-    let out = dir.join(name);
+    let out = dir.join(&name);
     match rec.save_last(before + since_death, &out) {
         Ok(()) => {
             crate::log(&format!("Saved {} (killed by {killer})", out.display()));
@@ -224,12 +250,36 @@ fn handle_death(app: AppHandle, rec: Arc<Recorder>, names: HashSet<String>, game
                 player::show(&app, &out, &format!("Death at {min}:{sec:02} - killed by {killer}"), since_death);
             }
             if s.save_clips {
-                prune(&s.clips_dir, (s.max_folder_gb * 1e9) as u64, &out);
+                let clip = game::Clip { kind: game::Kind::Death, game_time, killer: Some(killer), assisters, starred: false };
+                game::add_clip(&dir, &info, &name, clip);
+                thumbnail(&out, since_death + THUMBNAIL_BEFORE_DEATH);
+                prune_clips(&app, &s, &out);
             } else {
                 prune(&dir, 0, &out);
             }
         }
         Err(e) => crate::log(&format!("Clip save failed: {e}")),
+    }
+}
+
+/// How long before the death a clip's thumbnail is taken: the moment that tells what happened.
+const THUMBNAIL_BEFORE_DEATH: f64 = 1.0;
+
+/// Saves a small picture of the clip beside it, `from_end` seconds before its end, for the clip
+/// browser. A clip without one still plays; the browser shows a plain tile instead.
+fn thumbnail(clip: &Path, from_end: f64) {
+    if let Err(e) = save_thumbnail(&ffmpeg_path(), clip, &game::thumbnail(clip), from_end) {
+        crate::log(&format!("Couldn't save a thumbnail for {}: {e}", clip.display()));
+    }
+}
+
+/// Prunes the clips folder down to its size limit, and says so when starred clips had to go too.
+fn prune_clips(app: &AppHandle, s: &settings::Settings, newest: &Path) {
+    let starred = prune(&s.clips_dir, (s.max_folder_gb * 1e9) as u64, newest);
+    if starred > 0 {
+        let what = if starred == 1 { "a starred clip".to_string() } else { format!("{starred} starred clips") };
+        crate::log(&format!("Deleted {what}: the clips folder was over its limit with only starred clips left"));
+        toast::show(app, &format!("Deleted {what} - the clips folder is full"));
     }
 }
 
@@ -264,7 +314,7 @@ fn clip_time(game_time: u64) -> String {
 
 /// Sets what the save hotkey saves from (this game's recorder and clip folder), or `None` when not
 /// recording, then registers or releases the hotkey to match.
-fn set_recording(app: &AppHandle, now: Option<(Arc<Recorder>, PathBuf)>) {
+fn set_recording(app: &AppHandle, now: Option<(Arc<Recorder>, game::Current)>) {
     *app.state::<AppState>().recording.lock().unwrap() = now;
     arm_save_key(app);
 }
@@ -294,19 +344,20 @@ pub fn arm_save_key(app: &AppHandle) {
 }
 
 fn save_now(app: &AppHandle) {
-    let Some((rec, game_folder)) = app.state::<AppState>().recording.lock().unwrap().clone() else { return };
+    let Some((rec, game)) = app.state::<AppState>().recording.lock().unwrap().clone() else { return };
     crate::log("Save hotkey pressed - saving...");
     let app = app.clone();
-    thread::spawn(move || save_moment(app, rec, game_folder));
+    thread::spawn(move || save_moment(app, rec, game));
 }
 
 /// Keeps the last `before` seconds as e.g. "12m40s_saved.mp4": no wait for an "after", no replay
 /// window, just a toast. Goes to the clips folder even with "Save clips" off, since it was asked for.
-fn save_moment(app: AppHandle, rec: Arc<Recorder>, game_folder: PathBuf) {
+fn save_moment(app: AppHandle, rec: Arc<Recorder>, (game_folder, info): game::Current) {
     let s = settings::current(&app);
-    let name = format!("{}_saved.mp4", clip_time(game_time(&LiveClient::new())));
+    let game_time = game_time(&LiveClient::new());
+    let name = format!("{}_saved.mp4", clip_time(game_time));
     let dir = s.clips_dir.join(&game_folder);
-    let out = dir.join(name);
+    let out = dir.join(&name);
     let saved = std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Couldn't create {}: {e}", dir.display()))
         .and_then(|()| rec.save_last(s.before, &out));
@@ -314,7 +365,10 @@ fn save_moment(app: AppHandle, rec: Arc<Recorder>, game_folder: PathBuf) {
         Ok(()) => {
             crate::log(&format!("Saved {}", out.display()));
             toast::show(&app, "Saved");
-            prune(&s.clips_dir, (s.max_folder_gb * 1e9) as u64, &out);
+            let clip = game::Clip { kind: game::Kind::Saved, game_time, killer: None, assisters: vec![], starred: false };
+            game::add_clip(&dir, &info, &name, clip);
+            thumbnail(&out, SAVED_THUMBNAIL_FROM_END);
+            prune_clips(&app, &s, &out);
         }
         Err(e) => {
             crate::log(&format!("Clip save failed: {e}"));
@@ -322,6 +376,9 @@ fn save_moment(app: AppHandle, rec: Arc<Recorder>, game_folder: PathBuf) {
         }
     }
 }
+
+/// A saved clip's thumbnail: just before the key was pressed.
+const SAVED_THUMBNAIL_FROM_END: f64 = 2.0;
 
 /// Moves game folders from older versions' layout ("2026-11-21_2130_Jinx_SR", right in the clips
 /// folder) into day folders ("2026-11-210_Jinx_SR"). Renames on the same drive: nothing is
@@ -411,49 +468,58 @@ fn find_clips(dir: &Path, levels_down: u32, found: &mut Vec<(SystemTime, u64, Pa
     }
 }
 
-/// Deletes whole games, oldest first, until the folder's clips total at most `max_bytes`.
-/// A game is a game folder, or a single clip directly in `dir` (how the unsaved-replays folder holds them).
-/// A day folder goes with its last game.
-/// The game holding `newest` (the clip just saved) is never deleted, even if it alone is over the limit.
-fn prune(dir: &Path, max_bytes: u64, newest: &Path) {
-    let group_of = |clip: &Path| -> PathBuf {
-        match clip.parent() {
-            Some(parent) if parent != dir => parent.to_path_buf(),
-            _ => clip.to_path_buf(),
-        }
-    };
-    // game -> (last clip's time, total size)
-    let mut games: HashMap<PathBuf, (SystemTime, u64)> = HashMap::new();
-    for (modified, size, path) in clips(dir) {
-        let game = games.entry(group_of(&path)).or_insert((modified, 0));
-        game.0 = game.0.max(modified);
-        game.1 += size;
-    }
-    let current = group_of(newest);
-    let mut games: Vec<(SystemTime, u64, PathBuf)> =
-        games.into_iter().map(|(path, (modified, size))| (modified, size, path)).collect();
-    games.sort(); // oldest first
-    let mut total: u64 = games.iter().map(|(_, size, _)| size).sum();
-    for (_, size, path) in games {
+/// Deletes clips until the folder holds at most `max_bytes`, and returns how many starred ones had
+/// to go. Unstarred clips go first, oldest first, whatever their game; starred ones only once no
+/// unstarred clip is left to delete. A clip counts and goes with its inputs and thumbnail, and
+/// leaves its game's game.json. A game folder goes with its last clip, a day folder with its last game.
+/// Clips directly in `dir` stand alone (how the unsaved-replays folder holds them).
+/// Nothing in the game holding `newest` (the clip just saved) is deleted, even if it alone is over the limit.
+fn prune(dir: &Path, max_bytes: u64, newest: &Path) -> usize {
+    let game_of = |clip: &Path| clip.parent().filter(|parent| *parent != dir).map(Path::to_path_buf);
+    let name_of = |clip: &Path| clip.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let beside = |clip: &Path| [inputs::sidecar(clip), game::thumbnail(clip)];
+    let current = game_of(newest);
+    let mut stars: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+    let mut found: Vec<(bool, SystemTime, u64, PathBuf)> = clips(dir)
+        .into_iter()
+        .map(|(modified, size, path)| {
+            let extra: u64 = beside(&path).iter().filter_map(|f| f.metadata().ok()).map(|m| m.len()).sum();
+            let starred = game_of(&path)
+                .is_some_and(|game| stars.entry(game.clone()).or_insert_with(|| game::starred(&game)).contains(&name_of(&path)));
+            (starred, modified, size + extra, path)
+        })
+        .collect();
+    found.sort(); // unstarred before starred, then oldest first
+    let mut total: u64 = found.iter().map(|(_, _, size, _)| size).sum();
+    let mut starred_deleted = 0;
+    for (starred, _, size, path) in found {
         if total <= max_bytes {
             break;
         }
-        if path == current {
+        let game = game_of(&path);
+        if path == newest || (game.is_some() && game == current) {
             continue;
         }
-        // A game folder holds its clips' inputs too; a single clip has its own beside it.
-        let removed = if path.is_dir() {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path).inspect(|()| drop(std::fs::remove_file(inputs::sidecar(&path))))
-        };
-        if removed.is_ok() {
-            total -= size;
-            if let Some(day) = path.parent().filter(|day| *day != dir) {
+        if std::fs::remove_file(&path).is_err() {
+            continue; // open somewhere, say: tried again next time
+        }
+        for file in beside(&path) {
+            let _ = std::fs::remove_file(file);
+        }
+        total -= size;
+        starred_deleted += usize::from(starred);
+        let Some(game) = game else { continue };
+        let clips_left = std::fs::read_dir(&game)
+            .is_ok_and(|mut files| files.any(|f| f.is_ok_and(|f| f.path().extension().is_some_and(|x| x == "mp4"))));
+        if clips_left {
+            game::remove_clip(&game, &name_of(&path));
+        } else if std::fs::remove_dir_all(&game).is_ok() {
+            if let Some(day) = game.parent().filter(|day| *day != dir) {
                 let _ = std::fs::remove_dir(day); // only removes an empty folder
             }
         }
     }
+    starred_deleted
 }
 
 #[cfg(test)]
@@ -482,11 +548,14 @@ mod tests {
         let mut t: SYSTEMTIME = unsafe { std::mem::zeroed() };
         (t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond) = (2026, 11, 1, 9, 5, 5);
         let day = Path::new("2026-11-01");
-        assert_eq!(game_folder(&t, "Jinx", "CLASSIC"), day.join("0905_Jinx_SR"));
-        assert_eq!(game_folder(&t, "MissFortune", "ARAM"), day.join("0905_MissFortune_ARAM"));
-        assert_eq!(game_folder(&t, "Jinx", ""), day.join("0905_Jinx_Unknown"));
+        let folder = |champion: &str, mode: &str| game_folder(&t, champion, &short_mode(mode));
+        assert_eq!(folder("Jinx", "CLASSIC"), day.join("0905_Jinx_SR"));
+        assert_eq!(folder("MissFortune", "ARAM"), day.join("0905_MissFortune_ARAM"));
+        assert_eq!(folder("Jinx", ""), day.join("0905_Jinx_Unknown"));
         // Only the game's part is cleaned: the day's separator stays a separator.
-        assert_eq!(game_folder(&t, "Jinx", "Odd/Mode"), day.join("0905_Jinx_Odd-Mode"));
+        assert_eq!(folder("Jinx", "Odd/Mode"), day.join("0905_Jinx_Odd-Mode"));
+        // game.json keeps the start to the second.
+        assert_eq!(iso_time(&t), "2026-11-01T09:05:05");
     }
 
     #[test]
@@ -530,73 +599,92 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    #[test]
-    fn prune_deletes_a_day_with_its_last_game() {
-        let dir = std::env::temp_dir().join(format!("prune_days_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let now = SystemTime::now();
-        let make = |rel: &str, age: u64| {
-            let path = dir.join(rel);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            let f = std::fs::File::create(&path).unwrap();
-            f.set_len(100).unwrap();
-            f.set_modified(now - Duration::from_secs(age)).unwrap();
-            path
-        };
-        make("2026-11-21/2130_Jinx_SR/a.mp4", 50);
-        make("2026-11-22/0900_Lux_SR/a.mp4", 40);
-        make("2026-11-22/1000_Lux_SR/a.mp4", 30);
-        let newest = make("2026-11-23/1000_Vi_SR/a.mp4", 10);
+    /// A file of `size` bytes at `dir/rel`, last changed `age` seconds ago.
+    fn file(dir: &Path, rel: &str, size: u64, age: u64) -> PathBuf {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(size).unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(age)).unwrap();
+        path
+    }
 
-        // 400 bytes, limit 250: the 21st's only game goes, and the day with it; then the 22nd's
-        // first game, leaving that day its second.
-        prune(&dir, 250, &newest);
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("prune_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Records `clip` in its folder's game.json, starred or not.
+    fn record(clip: &Path, starred: bool) {
+        let entry = game::Clip { kind: game::Kind::Death, game_time: 60, killer: None, assisters: vec![], starred };
+        game::add_clip(clip.parent().unwrap(), &game::Info::default(), &clip.file_name().unwrap().to_string_lossy(), entry);
+    }
+
+    #[test]
+    fn prune_deletes_oldest_clips_first_and_empty_folders_after() {
+        let dir = temp_dir("oldest");
+        let jinx = file(&dir, "2026-11-21/2130_Jinx_SR/a.mp4", 100, 60);
+        let lux_a = file(&dir, "2026-11-22/0900_Lux_SR/a.mp4", 100, 50);
+        let lux_b = file(&dir, "2026-11-22/0900_Lux_SR/b.mp4", 100, 40);
+        let newest = file(&dir, "2026-11-23/1000_Vi_SR/a.mp4", 100, 10);
+        for clip in [&jinx, &lux_a, &lux_b, &newest] {
+            record(clip, false);
+        }
+        // A clip's inputs and thumbnail count toward the limit and go with it.
+        file(&dir, "2026-11-22/0900_Lux_SR/a.inputs.json", 50, 50);
+        file(&dir, "2026-11-22/0900_Lux_SR/a.jpg", 50, 50);
+
+        // 500 bytes, limit 250: the 21st's only clip goes, its game and day with it; then Lux's
+        // older clip (200 with its files), leaving that game its newer one and a game.json without a.
+        assert_eq!(prune(&dir, 250, &newest), 0);
         assert!(!dir.join("2026-11-21").exists());
-        assert!(!dir.join("2026-11-22/0900_Lux_SR").exists());
-        assert!(dir.join("2026-11-22/1000_Lux_SR/a.mp4").exists() && newest.exists());
+        let lux = dir.join("2026-11-22/0900_Lux_SR");
+        assert!(!lux_a.exists() && !lux.join("a.inputs.json").exists() && !lux.join("a.jpg").exists());
+        assert!(lux_b.exists() && newest.exists());
+        assert_eq!(game::read(&lux).unwrap().clips.keys().collect::<Vec<_>>(), ["b.mp4"]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn prune_deletes_whole_games() {
-        let dir = std::env::temp_dir().join(format!("prune_games_test_{}", std::process::id()));
-        let games = [dir.join("game1"), dir.join("game2"), dir.join("game3")];
-        let now = SystemTime::now();
-        let mut age = 100;
-        // A loose clip, then two clips each in game1 and game2, one in game3.
-        let mut make = |folder: &Path, name: &str| {
-            std::fs::create_dir_all(folder).unwrap();
-            let path = folder.join(name);
-            let f = std::fs::File::create(&path).unwrap();
-            f.set_len(100).unwrap();
-            f.set_modified(now - Duration::from_secs(age)).unwrap();
-            age -= 1;
-            path
-        };
-        let loose = make(&dir, "old.mp4");
-        let other = dir.join("other.inputs.json"); // another clip's inputs: not the loose clip's
-        for inputs in [inputs::sidecar(&loose), other.clone(), inputs::sidecar(&games[0].join("a.mp4"))] {
-            std::fs::create_dir_all(inputs.parent().unwrap()).unwrap();
-            std::fs::write(inputs, "{}").unwrap();
+    fn prune_keeps_starred_clips_until_nothing_else_is_left() {
+        let dir = temp_dir("stars");
+        let old_star = file(&dir, "2026-11-20/1000_Jinx_SR/a.mp4", 100, 90);
+        let old_plain = file(&dir, "2026-11-20/1000_Jinx_SR/b.mp4", 100, 80);
+        let new_star = file(&dir, "2026-11-21/1000_Lux_SR/a.mp4", 100, 30);
+        let new_plain = file(&dir, "2026-11-21/1000_Lux_SR/b.mp4", 100, 20);
+        let current = file(&dir, "2026-11-22/1000_Vi_SR/a.mp4", 100, 15);
+        let newest = file(&dir, "2026-11-22/1000_Vi_SR/b.mp4", 100, 10);
+        for (clip, starred) in [(&old_star, true), (&old_plain, false), (&new_star, true), (&new_plain, false), (&current, false), (&newest, false)] {
+            record(clip, starred);
         }
-        make(&games[0], "a.mp4");
-        make(&games[0], "b.mp4");
-        make(&games[1], "a.mp4");
-        make(&games[1], "b.mp4");
-        let newest = make(&games[2], "a.mp4");
-        assert_eq!(clips(&dir).len(), 6);
 
-        // 600 bytes, limit 250: the loose clip and game1 go, which leaves 300, so game2 goes as a
-        // whole too rather than losing just one of its clips.
-        prune(&dir, 250, &newest);
-        assert!(!loose.exists() && !games[0].exists() && !games[1].exists());
-        assert!(newest.exists());
-        // The loose clip's inputs went with it (game folders' go with the folder).
-        assert!(!inputs::sidecar(&loose).exists() && other.exists());
+        // 600 bytes, limit 400: both unstarred clips go, the newer one before any starred clip,
+        // however old that is.
+        assert_eq!(prune(&dir, 400, &newest), 0);
+        assert!(!old_plain.exists() && !new_plain.exists());
+        assert!(old_star.exists() && new_star.exists());
 
-        // The current game is kept even when it alone is over the limit.
-        prune(&dir, 0, &newest);
-        assert!(newest.exists());
+        // Limit 300: only starred clips (and the current game's) are left, so the oldest starred one goes.
+        assert_eq!(prune(&dir, 300, &newest), 1);
+        assert!(!old_star.exists() && !dir.join("2026-11-20").exists() && new_star.exists());
+
+        // The current game is kept whole, even when it alone is over the limit.
+        assert_eq!(prune(&dir, 0, &newest), 1);
+        assert!(!new_star.exists() && current.exists() && newest.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn prune_treats_loose_clips_one_by_one() {
+        // The unsaved-replays folder: clips right in it, each with its own inputs, no game.json.
+        let dir = temp_dir("loose");
+        let old = file(&dir, "old.mp4", 100, 30);
+        let inputs = file(&dir, "old.inputs.json", 10, 30);
+        let other = file(&dir, "other.inputs.json", 10, 30); // another clip's: stays
+        let newest = file(&dir, "new.mp4", 100, 10);
+        assert_eq!(prune(&dir, 0, &newest), 0);
+        assert!(!old.exists() && !inputs.exists() && other.exists() && newest.exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

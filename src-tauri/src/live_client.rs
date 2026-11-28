@@ -122,6 +122,41 @@ pub fn find_killer(events: Option<&Value>, players: Option<&Value>, names: &Hash
     Named { file: pretty.replace(' ', ""), display: pretty }
 }
 
+/// The champions that helped kill the local player most recently, as the game shows them.
+pub fn find_assisters(events: Option<&Value>, players: Option<&Value>, names: &HashSet<String>) -> Vec<String> {
+    let events = events.and_then(|e| e.get("Events")).and_then(Value::as_array);
+    let Some(death) = events
+        .into_iter()
+        .flatten()
+        .rev()
+        .filter(|ev| ev.get("EventName").and_then(Value::as_str) == Some("ChampionKill"))
+        .find(|ev| is_me(ev.get("VictimName").and_then(Value::as_str).unwrap_or(""), names))
+    else {
+        return vec![];
+    };
+    let assisters = death.get("Assisters").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
+    assisters
+        .filter(|a| !a.is_empty())
+        .map(|a| {
+            let who = HashSet::from([a.to_string(), without_tag(a).to_string()]);
+            players.and_then(|p| find_player(p, &who)).and_then(champion).map_or_else(|| pretty_killer(a), |c| c.display)
+        })
+        .collect()
+}
+
+/// "Win" or "Lose", once the game has ended: its `GameEnd` event says which, in the few seconds
+/// before the game closes and the API with it.
+pub fn game_result(events: Option<&Value>) -> Option<String> {
+    events
+        .and_then(|e| e.get("Events"))
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|ev| ev.get("EventName").and_then(Value::as_str) == Some("GameEnd"))
+        .and_then(|ev| ev.get("Result").and_then(Value::as_str))
+        .filter(|r| !r.is_empty())
+        .map(str::to_string)
+}
+
 /// Kills further apart than this (in seconds) are separate fights.
 const FIGHT_GAP: f64 = 10.0;
 
@@ -327,5 +362,35 @@ mod tests {
         assert_eq!((by_faker.display.as_str(), by_faker.file.as_str()), ("Miss Fortune", "MissFortune"));
         let by_herald = find_killer(Some(&kill("SRU_RiftHerald17.1.1")), Some(&players), &names);
         assert_eq!((by_herald.display.as_str(), by_herald.file.as_str()), ("Rift Herald", "RiftHerald"));
+    }
+
+    #[test]
+    fn names_assisters_of_the_latest_death() {
+        let names = my_names(&serde_json::json!({ "riotId": "Robin#EUW" }));
+        let players = serde_json::json!([
+            { "riotId": "Faker#KR1", "championName": "Ahri", "rawChampionName": "game_character_displayname_Ahri" },
+            { "riotId": "Zeus#KR1", "championName": "Jayce", "rawChampionName": "game_character_displayname_Jayce" },
+        ]);
+        let events = serde_json::json!({ "Events": [
+            kill(100.0, "Zeus", "Robin", &["Faker"]),
+            kill(300.0, "Faker", "Robin#EUW", &["Zeus#KR1", "SRU_Baron12.1.1"]), // a tag and a monster
+            kill(310.0, "Robin", "Zeus", &["Ally"]), // not a death of ours
+        ]});
+        assert_eq!(find_assisters(Some(&events), Some(&players), &names), ["Jayce", "Baron"]);
+        let solo = serde_json::json!({ "Events": [kill(100.0, "Zeus", "Robin", &[])] });
+        assert!(find_assisters(Some(&solo), Some(&players), &names).is_empty());
+        assert!(find_assisters(None, None, &names).is_empty());
+    }
+
+    #[test]
+    fn reads_the_game_result() {
+        let ended = |result: &str| serde_json::json!({ "Events": [
+            { "EventName": "GameStart", "EventTime": 0.0 },
+            { "EventName": "GameEnd", "EventTime": 1800.0, "Result": result },
+        ]});
+        assert_eq!(game_result(Some(&ended("Win"))).as_deref(), Some("Win"));
+        assert_eq!(game_result(Some(&ended("Lose"))).as_deref(), Some("Lose"));
+        assert_eq!(game_result(Some(&serde_json::json!({ "Events": [kill(1.0, "A", "B", &[])] }))), None);
+        assert_eq!(game_result(None), None);
     }
 }
